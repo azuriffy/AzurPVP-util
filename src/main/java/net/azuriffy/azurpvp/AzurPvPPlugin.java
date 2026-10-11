@@ -18,6 +18,9 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.Material;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.boss.*;
+import org.bukkit.scoreboard.Scoreboard;
+import org.bukkit.scoreboard.Team;
+import org.bukkit.event.player.PlayerCommandSendEvent;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
@@ -55,10 +58,14 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         getServer().getPluginManager().registerEvents(this, this);
         combatTask = Bukkit.getScheduler().runTaskTimer(this, this::updateCombat, 1L, 10L);
-        // First-run bootstrap: grant the first online operator the permanent dev role if no dev exists.
-        if (roles.getConfigurationSection("users") == null || roles.getConfigurationSection("users").getKeys(false).stream().noneMatch(id -> "dev".equalsIgnoreCase(roles.getString("users."+id+".role","")))) {
-            Bukkit.getScheduler().runTask(this, () -> Bukkit.getOnlinePlayers().stream().filter(Player::isOp).findFirst().ifPresent(p -> assignRole(p.getUniqueId(), p.getName(), "dev")));
-        }
+        // Bootstrap: migrate the old owner role to owner and grant the first operator owner if none exists.
+        migrateAndEnsureRoles();
+        Bukkit.getScheduler().runTask(this, () -> {
+            for (Player online : Bukkit.getOnlinePlayers()) updateTabRole(online);
+            if (roles.getConfigurationSection("users") == null || roles.getConfigurationSection("users").getKeys(false).stream().noneMatch(id -> "owner".equalsIgnoreCase(roles.getString("users."+id+".role","")))) {
+                Bukkit.getOnlinePlayers().stream().filter(Player::isOp).findFirst().ifPresent(p -> assignRole(p.getUniqueId(), p.getName(), "owner"));
+            }
+        });
         getLogger().info("AzurPvP Utils enabled (Paper 1.21.11 target, SQLite, role system).");
     }
 
@@ -72,71 +79,128 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private void loadRoles() {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         rolesFile = new File(getDataFolder(), "roles.yml");
-        if (!rolesFile.exists()) {
-            roles = new YamlConfiguration();
-            roles.set("roles.dev.permissions", List.of("*"));
-            roles.set("roles.staff.permissions", List.of("moderation", "staff", "teleport", "inspect"));
-            roles.set("roles.player.permissions", List.of("player"));
-            saveRoles();
-        } else {
-            roles = YamlConfiguration.loadConfiguration(rolesFile);
-            if (!roles.contains("roles.dev")) roles.set("roles.dev.permissions", List.of("*"));
-            if (!roles.contains("roles.staff")) roles.set("roles.staff.permissions", List.of("moderation", "staff", "teleport", "inspect"));
-            if (!roles.contains("roles.player")) roles.set("roles.player.permissions", List.of("player"));
-            saveRoles();
+        roles = rolesFile.exists() ? YamlConfiguration.loadConfiguration(rolesFile) : new YamlConfiguration();
+        migrateAndEnsureRoles();
+    }
+    private void migrateAndEnsureRoles() {
+        ensureRole("owner", "*", "&d&lOWNER", 0);
+        ensureRole("admin", "moderation", "&c&lADMIN", 1);
+        ensureRole("mod", "moderation,staff,teleport", "&b&lMOD", 2);
+        ensureRole("helper", "staff", "&a&lHELPER", 3);
+        ensureRole("creator", "member", "&d&lCREATOR", 4);
+        ensureRole("azur+", "member", "&5&lAZUR+", 5);
+        ensureRole("member", "member", "&dMEMBER", 6);
+        if (roles.getConfigurationSection("users") != null) {
+            for (String id : roles.getConfigurationSection("users").getKeys(false)) {
+                if ("owner".equalsIgnoreCase(roles.getString("users."+id+".role", ""))) roles.set("users."+id+".role", "owner");
+                if ("member".equalsIgnoreCase(roles.getString("users."+id+".role", ""))) roles.set("users."+id+".role", "member");
+            }
         }
+        saveRoles();
+    }
+    private void ensureRole(String role, String permissions, String prefix, int order) {
+        String path = "roles." + role;
+        if (!roles.isConfigurationSection(path)) roles.createSection(path);
+        List<String> perms = switch (role) {
+            case "owner" -> List.of("*");
+            case "admin" -> List.of("moderation","staff","teleport","inspect","utility");
+            case "mod" -> List.of("moderation","staff","teleport");
+            case "helper" -> List.of("staff");
+            default -> List.of("player");
+        };
+        roles.set(path + ".permissions", perms);
+        roles.set(path + ".prefix", prefix);
+        roles.set(path + ".order", order);
+        roles.set(path + ".rgb", switch(role) {
+            case "owner" -> "177,156,217"; case "admin" -> "255,0,0"; case "mod" -> "144,213,255";
+            case "helper" -> "144,238,144"; case "creator" -> "255,192,203"; case "azur+" -> "128,0,128"; default -> "183,144,212";
+        });
     }
     private void saveRoles() { try { if (roles != null && rolesFile != null) roles.save(rolesFile); } catch (Exception ex) { getLogger().warning("Could not save roles.yml: "+ex.getMessage()); } }
-    private String roleOf(UUID id) { return roles.getString("users."+id+".role", "player").toLowerCase(Locale.ROOT); }
+    private String roleOf(UUID id) { return roles.getString("users."+id+".role", "member").toLowerCase(Locale.ROOT); }
     private boolean hasRole(UUID id, String role) { return roleOf(id).equalsIgnoreCase(role); }
-    // Recovery path: server operators can manage roles even if first-run dev assignment was missed.
-    // This lets the owner run /role set <their-name> dev, then continue with the normal role system.
-    private boolean isDev(CommandSender s) { return s instanceof Player p && (p.isOp() || hasRole(p.getUniqueId(),"dev")); }
+    // Only the owner role (or server console) can manage roles.
+    private boolean isDev(CommandSender s) { return s instanceof ConsoleCommandSender || (s instanceof Player p && hasRole(p.getUniqueId(), "owner")); }
     private boolean isStaff(CommandSender s) {
         if (isDev(s)) return true;
         if (!(s instanceof Player p)) return true;
-        List<String> perms = roles.getStringList("roles."+roleOf(p.getUniqueId())+".permissions");
-        return roleOf(p.getUniqueId()).equals("staff") || perms.contains("staff") || perms.contains("moderation");
+        String role = roleOf(p.getUniqueId());
+        return Set.of("admin", "mod", "helper").contains(role);
     }
     private boolean can(CommandSender s, String category) {
         if (!(s instanceof Player p)) return true;
         String role = roleOf(p.getUniqueId());
-        if (role.equals("dev")) return true;
-        if (role.equals("staff")) return Set.of("moderation","staff","teleport","inspect","utility").contains(category);
-        return category.equals("player");
+        if (role.equals("owner")) return true;
+        List<String> perms = roles.getStringList("roles." + role + ".permissions");
+        return perms.contains("*") || perms.contains(category) || category.equals("member");
+    }
+    private String rolePrefix(String role) { return c(roles.getString("roles."+role+".prefix", "&dMEMBER")); }
+    private void updateTabRole(Player p) {
+        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+        String role = roleOf(p.getUniqueId());
+        if (!roleExists(role)) role = "member";
+        String teamName = String.format(Locale.ROOT, "%02d_%s", roles.getInt("roles."+role+".order", 6), role.replaceAll("[^a-zA-Z0-9_]", ""));
+        Team team = board.getTeam(teamName);
+        if (team == null) team = board.registerNewTeam(teamName);
+        team.setPrefix(rolePrefix(role) + c(" &f"));
+        try { team.setColor(ChatColor.getByChar(colorCode(role))); } catch (Exception ignored) {}
+        for (Team other : board.getTeams()) if (other != team && other.hasEntry(p.getName())) other.removeEntry(p.getName());
+        if (!team.hasEntry(p.getName())) team.addEntry(p.getName());
+        p.setScoreboard(board);
+    }
+    private char colorCode(String role) {
+        return switch(role) { case "owner", "creator", "member" -> 'd'; case "admin" -> 'c'; case "mod" -> 'b'; case "helper" -> 'a'; case "azur+" -> '5'; default -> 'f'; };
+    }
+    @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
+        Player p = e.getPlayer();
+        Set<String> restricted = Set.of("setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","tphere","whois","heal","feed","vanish","freeze","staffchat","role","arena");
+        if (isDev(p)) return;
+        e.getCommands().removeIf(command -> restricted.contains(command.toLowerCase(Locale.ROOT).split(":")[0]) && !can(p, commandCategory(command)));
+    }
+    private String commandCategory(String command) {
+        return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
+            case "setspawn","maintenance","backup","role","arena" -> "owner";
+            case "ban","tempban","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
+            case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
+            case "tphere" -> "teleport";
+            default -> "member";
+        };
     }
     private void assignRole(UUID id, String name, String role) {
         if (!roles.contains("roles."+role)) return;
-        roles.set("users."+id+".role", role.toLowerCase(Locale.ROOT));
+        String normalized = role.toLowerCase(Locale.ROOT);
+        roles.set("users."+id+".role", normalized);
         roles.set("users."+id+".name", name);
         saveRoles();
+        Player online = Bukkit.getPlayer(id);
+        if (online != null) updateTabRole(online);
     }
     private boolean roleExists(String role) { return roles.isConfigurationSection("roles."+role.toLowerCase(Locale.ROOT)); }
     private void roleCommand(CommandSender s, String[] a) {
         if (a.length == 0 || a[0].equalsIgnoreCase("help")) {
             tell(s,"&dRole system: &f/role list, /role create <name>, /role delete <name>, /role set <player> <role>, /role permission <role> <category>, /role info <name>");
-            tell(s,"&7Only dev can manage roles. The built-in &ddev &7role cannot be deleted.");
+            tell(s,"&7Only owner can manage roles. The built-in &downer &7role cannot be deleted.");
             return;
         }
-        if (!isDev(s)) { tell(s,"&cOnly users with the dev role can manage roles."); return; }
+        if (!isDev(s)) { tell(s,"&cOnly users with the owner role can manage roles."); return; }
         switch (a[0].toLowerCase(Locale.ROOT)) {
             case "list" -> {
                 tell(s,"&dRoles:");
-                for (String r : roles.getConfigurationSection("roles").getKeys(false)) tell(s,"&8- &f"+r+(r.equalsIgnoreCase("dev")?" &d(locked)":""));
+                for (String r : roles.getConfigurationSection("roles").getKeys(false)) tell(s,"&8- &f"+r+(r.equalsIgnoreCase("owner")?" &d(locked)":""));
             }
             case "create" -> {
                 if (a.length<2) { tell(s,"&cUsage: /role create <name>"); return; }
                 String r=a[1].toLowerCase(Locale.ROOT);
                 if (!r.matches("[a-z0-9_-]{2,24}") || roleExists(r)) { tell(s,"&cInvalid or existing role name."); return; }
-                roles.set("roles."+r+".permissions", List.of("player")); saveRoles(); tell(s,"&aCreated role &d"+r+"&a.");
+                roles.set("roles."+r+".permissions", List.of("member")); saveRoles(); tell(s,"&aCreated role &d"+r+"&a.");
             }
             case "delete" -> {
                 if (a.length<2) { tell(s,"&cUsage: /role delete <name>"); return; }
                 String r=a[1].toLowerCase(Locale.ROOT);
-                if (r.equals("dev")) { tell(s,"&cThe dev role is permanent and cannot be deleted."); return; }
+                if (r.equals("owner")) { tell(s,"&cThe owner role is permanent and cannot be deleted."); return; }
                 if (!roleExists(r)) { tell(s,"&cThat role does not exist."); return; }
                 roles.set("roles."+r,null);
-                if (roles.getConfigurationSection("users")!=null) for(String id:roles.getConfigurationSection("users").getKeys(false)) if (roles.getString("users."+id+".role","player").equalsIgnoreCase(r)) roles.set("users."+id+".role","player");
+                if (roles.getConfigurationSection("users")!=null) for(String id:roles.getConfigurationSection("users").getKeys(false)) if (roles.getString("users."+id+".role","member").equalsIgnoreCase(r)) roles.set("users."+id+".role","member");
                 saveRoles(); tell(s,"&aDeleted role &d"+r+"&a; affected users are now players.");
             }
             case "set", "assign" -> {
@@ -149,8 +213,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             case "permission", "perm" -> {
                 if(a.length<3 || !roleExists(a[1])) { tell(s,"&cUsage: /role permission <role> <category>"); return; }
                 String r=a[1].toLowerCase(Locale.ROOT), category=a[2].toLowerCase(Locale.ROOT);
-                if(r.equals("dev")) { tell(s,"&cThe dev role already has all permissions."); return; }
-                if(!Set.of("player","staff","moderation","teleport","inspect","utility").contains(category)) { tell(s,"&cCategories: player, staff, moderation, teleport, inspect, utility"); return; }
+                if(r.equals("owner")) { tell(s,"&cThe owner role already has all permissions."); return; }
+                if(!Set.of("member","staff","moderation","teleport","inspect","utility").contains(category)) { tell(s,"&cCategories: player, staff, moderation, teleport, inspect, utility"); return; }
                 List<String> perms=new ArrayList<>(roles.getStringList("roles."+r+".permissions"));
                 if(perms.contains(category)) { perms.remove(category); tell(s,"&dRemoved &f"+category+"&d from role &f"+r+"&d."); }
                 else { perms.add(category); tell(s,"&aAdded &f"+category+"&a to role &f"+r+"&a."); }
@@ -220,7 +284,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     @EventHandler public void onJoin(PlayerJoinEvent e) {
-        Player p=e.getPlayer(); ensurePlayer(p); if(!roleExists(roleOf(p.getUniqueId()))) assignRole(p.getUniqueId(),p.getName(),"player");
+        Player p=e.getPlayer(); ensurePlayer(p); if(!roleExists(roleOf(p.getUniqueId()))) assignRole(p.getUniqueId(),p.getName(),"member");
+        updateTabRole(p);
         if (getConfig().getBoolean("maintenance.enabled", false) && !isStaff(p)) { Bukkit.getScheduler().runTask(this, () -> p.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled."))); return; }
         e.setJoinMessage(c("&8[&a+&8] &d" + p.getName()));
         p.sendTitle(c("&5&lAZUR&d&lPVP"), c("&7Welcome to the arena"), 10, 45, 15);
@@ -278,11 +343,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public boolean onCommand(CommandSender s, Command cmd, String label, String[] a) {
         String n=cmd.getName().toLowerCase(Locale.ROOT);
+        String category = commandCategory(n);
+        if (!can(s, category)) { tell(s, "&cYou don't have permission to use that command."); return true; }
         if(n.equals("role")) { roleCommand(s,a); return true; }
-        if(n.equals("azurpvp")) { tell(s,"&dAzurPvP Utils &8— &fPaper 1.21.11"); tell(s,"&7Player: &d/spawn, /stats, /kit, /duel, /msg, /reply, /ignore, /top, /back");
-            tell(s,"&7Utility: &d/rules, /discord, /ping, /tps, /tpa, /home, /sethome, /warp, /settings");
-            tell(s,"&7Staff: &d/freeze, /vanish, /report, /staffchat, /invsee, /ban, /mute, /kick, /history");
-            if(isDev(s)) tell(s,"&dDev: &f/role, /setspawn, /arena, /maintenance, /backup"); return true; }
+        if(n.equals("help")) {
+            tell(s, "&d&lAzurPvP Commands &8— &7private help");
+            tell(s, "&7Players: &f/spawn, /stats, /kit, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report");
+            if (can(s,"staff")) tell(s, "&aStaff: &f/fly, /vanish, /freeze, /staffchat, /whois, /announce");
+            if (can(s,"moderation")) tell(s, "&cModeration: &f/ban, /tempban, /unban, /kick, /mute, /unmute, /warn, /history, /heal, /feed, /gamemode, /speed, /clear, /repair");
+            if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup, /arena");
+            return true;
+        }
+        if(n.equals("azurpvp")) { tell(s,"&dAzurPvP Utils &8— &fPaper 1.21.11"); tell(s,"&7Use &d/help &7to privately view the commands available to your role."); return true; }
         if(n.equals("setspawn")) {
             if(!(s instanceof Player p)) {tell(s,"&cPlayers only.");return true;} if(!isDev(p)){tell(s,"&cNo permission.");return true;}
             Location l=p.getLocation(); getConfig().set("spawn.world",l.getWorld().getName()); getConfig().set("spawn.x",l.getX()); getConfig().set("spawn.y",l.getY()); getConfig().set("spawn.z",l.getZ()); getConfig().set("spawn.yaw",l.getYaw()); getConfig().set("spawn.pitch",l.getPitch()); saveConfig(); tell(p,"&aSpawn saved."); return true;
@@ -344,7 +416,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("repair")) { if(!(s instanceof Player p))return true;ItemStack it=p.getInventory().getItemInMainHand();if(it.getType()==Material.AIR||it.getType().getMaxDurability()==0){tell(p,"&cHold a damageable item.");return true;}it.setDurability((short)0);tell(p,"&dItem repaired.");return true; }
         if(n.equals("whois")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}tell(s,"&d"+t.getName()+" &7UUID: &f"+t.getUniqueId()+" &7Ping: &f"+t.getPing()+"ms &7Role: &f"+roleOf(t.getUniqueId()));return true; }
         if(n.equals("announce")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Bukkit.broadcastMessage(prefix()+c(String.join(" ",a)));return true; }
-        if(n.equals("maintenance")) { if(!isDev(s)){tell(s,"&cDev role required.");return true;} boolean enabled=!getConfig().getBoolean("maintenance.enabled",false);getConfig().set("maintenance.enabled",enabled);saveConfig();tell(s,"&dMaintenance mode "+(enabled?"enabled":"disabled")+".");return true; }
+        if(n.equals("maintenance")) { if(!isDev(s)){tell(s,"&cOwner role required.");return true;} boolean enabled=!getConfig().getBoolean("maintenance.enabled",false);getConfig().set("maintenance.enabled",enabled);saveConfig();tell(s,"&dMaintenance mode "+(enabled?"enabled":"disabled")+".");return true; }
         if(n.equals("settings")) { if(!(s instanceof Player p))return true;tell(p,"&dUse config.yml to configure personal/server feature toggles in this build.");return true; }
         if(n.equals("playtime")) { if(!(s instanceof Player p))return true;long seconds=getStat(p.getUniqueId(),"playtime_seconds");tell(p,"&dPlaytime: &f"+(seconds/3600)+"h "+((seconds%3600)/60)+"m");return true; }
         if(n.equals("cps")) { tell(s,"&7CPS monitoring is not active in this build; use a dedicated anti-cheat for enforcement.");return true; }
