@@ -15,6 +15,12 @@ import org.bukkit.attribute.Attribute;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Container;
 import org.bukkit.event.player.*;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.Inventory;
@@ -64,6 +70,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public void onEnable() {
         saveDefaultConfig();
+        ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
         for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tphere", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp")) {
@@ -172,44 +179,44 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     private void updateAzurTabAndScoreboard(Player p) {
         p.setPlayerListHeaderFooter(
-            c("\n&6&lAZURPVP\n&eLONDON &8| &f1.21.11+\n"),
-            c("\n&7Players: &6" + Bukkit.getOnlinePlayers().size() + "\n"
-                + "&7Your ping: &a" + p.getPing() + "ms\n"
+            c("\n&5&lAZUR&d&lPVP\n&7Minecraft 1.21.11+\n"),
+            c("\n&7Players: &d" + Bukkit.getOnlinePlayers().size() + "\n"
+                + "&7Ping: &a" + p.getPing() + "ms\n"
                 + "&d/discord &8| &d/store &8| &d/website\n")
         );
-
         Scoreboard board = p.getScoreboard();
-        if (board == Bukkit.getScoreboardManager().getMainScoreboard()) { board = Bukkit.getScoreboardManager().getNewScoreboard(); p.setScoreboard(board); updateTabRole(p); board = p.getScoreboard(); }
+        if (board == Bukkit.getScoreboardManager().getMainScoreboard()) {
+            board = Bukkit.getScoreboardManager().getNewScoreboard();
+            p.setScoreboard(board);
+            updateTabRole(p);
+            board = p.getScoreboard();
+        }
         org.bukkit.scoreboard.Objective objective = board.getObjective("azurpvp");
         if (objective == null) objective = board.registerNewObjective("azurpvp", "dummy", c("&5&lAZUR&d&lPVP"));
         objective.setDisplayName(c("&5&lAZUR&d&lPVP"));
         objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
-        // Hide vanilla sidebar score numbers on Paper versions that support NumberFormat,
-        // using reflection so this source still compiles against older API artifacts.
-        try {
-            Class<?> numberFormatClass = Class.forName("org.bukkit.scoreboard.NumberFormat");
-            Object blankFormat = numberFormatClass.getMethod("blank").invoke(null);
-            try {
-                org.bukkit.scoreboard.Objective.class.getMethod("numberFormat", numberFormatClass).invoke(objective, blankFormat);
-            } catch (NoSuchMethodException missingSetter) {
-                org.bukkit.scoreboard.Objective.class.getMethod("setNumberFormat", numberFormatClass).invoke(objective, blankFormat);
-            }
-        } catch (ReflectiveOperationException ignored) { }
         String role = roleOf(p.getUniqueId());
         String[] lines = {
             "&7Online: &d" + Bukkit.getOnlinePlayers().size(),
             "&dPlayer: &f" + p.getName(),
-            "&r ",
-            "&dServer: &fLondon",
+            "&7Ping: &a" + p.getPing() + "ms",
             "&dYour role: " + rolePrefix(role),
-            "&r  ",
-            "&dDuel: &f/duel <player>"
+            "&r ",
+            "&d⚔ or /duel to duel"
         };
         for (String entry : new HashSet<>(board.getEntries())) objective.getScore(entry).resetScore();
         int score = lines.length;
         for (int i = 0; i < lines.length; i++) {
             String unique = c(lines[i]) + ChatColor.values()[i].toString();
-            objective.getScore(unique).setScore(score--);
+            org.bukkit.scoreboard.Score sc = objective.getScore(unique);
+            sc.setScore(score--);
+            // Paper exposes blank score-number formatting on Score. Use reflection for API compatibility.
+            try {
+                Class<?> nf = Class.forName("org.bukkit.scoreboard.NumberFormat");
+                Object blank = nf.getMethod("blank").invoke(null);
+                try { sc.getClass().getMethod("numberFormat", nf).invoke(sc, blank); }
+                catch (NoSuchMethodException ex) { sc.getClass().getMethod("setNumberFormat", nf).invoke(sc, blank); }
+            } catch (ReflectiveOperationException ignored) { }
         }
         p.setScoreboard(board);
     }
@@ -363,6 +370,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (getConfig().getBoolean("maintenance.enabled", false) && !isStaff(p)) { Bukkit.getScheduler().runTask(this, () -> p.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled."))); return; }
         e.setJoinMessage(c("&8[&a+&8] &d" + p.getName()));
         p.sendTitle(c("&5&lAZUR&d&lPVP"), c("&7Welcome to the arena"), 10, 45, 15);
+        giveDuelItem(p); giveKitEditor(p);
         p.sendMessage(prefix()+c("&7Use &d/azurpvp &7for plugin commands."));
     }
     @EventHandler public void onQuit(PlayerQuitEvent e) {
@@ -382,8 +390,24 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (e.getTo()!=null && (e.getFrom().getBlockX()!=e.getTo().getBlockX() || e.getFrom().getBlockZ()!=e.getTo().getBlockZ()))
             lastLocations.put(e.getPlayer().getUniqueId(), e.getFrom().clone());
     }
+    private boolean inSpawnProtection(Location location) {
+        if (location == null || location.getWorld() == null || !getConfig().contains("spawn.world")) return false;
+        if (!location.getWorld().getName().equals(getConfig().getString("spawn.world"))) return false;
+        double dx=location.getX()-getConfig().getDouble("spawn.x"), dz=location.getZ()-getConfig().getDouble("spawn.z");
+        return dx*dx+dz*dz <= 500.0*500.0;
+    }
+    @EventHandler public void protectSpawnBlockBreak(BlockBreakEvent e) { if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); } }
+    @EventHandler public void protectSpawnBlockPlace(BlockPlaceEvent e) { if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); } }
+    @EventHandler public void protectSpawnInteractions(PlayerInteractEvent e) {
+        if (e.getClickedBlock()==null || !inSpawnProtection(e.getClickedBlock().getLocation())) return;
+        Material type=e.getClickedBlock().getType();
+        if (type==Material.ENDER_CHEST || type==Material.CHEST || type==Material.TRAPPED_CHEST || type==Material.BARREL || type.name().endsWith("SHULKER_BOX")) {
+            if (!type.name().endsWith("SHULKER_BOX")) { e.setCancelled(true); tell(e.getPlayer(),"&cContainer access is disabled in spawn protection."); }
+        }
+    }
     @EventHandler public void onDamage(org.bukkit.event.entity.EntityDamageByEntityEvent e) {
         if (e.getEntity() instanceof Player victim && e.getDamager() instanceof Player attacker) {
+            if (inSpawnProtection(victim.getLocation()) || inSpawnProtection(attacker.getLocation())) { e.setCancelled(true); return; }
             tag(victim); tag(attacker);
             if (god.contains(victim.getUniqueId())) e.setCancelled(true);
             if (getConfig().getBoolean("pvp.custom-knockback",false)) {
@@ -548,7 +572,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(n.equals("setspawn")) {
             if(!(s instanceof Player p)) {tell(s,"&cPlayers only.");return true;} if(!isDev(p)){tell(s,"&cNo permission.");return true;}
-            Location l=p.getLocation(); getConfig().set("spawn.world",l.getWorld().getName()); getConfig().set("spawn.x",l.getX()); getConfig().set("spawn.y",l.getY()); getConfig().set("spawn.z",l.getZ()); getConfig().set("spawn.yaw",l.getYaw()); getConfig().set("spawn.pitch",l.getPitch()); saveConfig(); tell(p,"&aSpawn saved."); return true;
+            Location l=p.getLocation(); getConfig().set("spawn.world",l.getWorld().getName()); getConfig().set("spawn.x",l.getX()); getConfig().set("spawn.y",l.getY()); getConfig().set("spawn.z",l.getZ()); getConfig().set("spawn.yaw",l.getYaw()); getConfig().set("spawn.pitch",l.getPitch()); saveConfig(); tell(p,"&aSpawn saved. &7A 500-block radius is now protected from PvP, block changes, and container access."); return true;
         }
         if(n.equals("spawn")) {
             if(!(s instanceof Player p))return true; if(tagged(p)){tell(p,"&cYou cannot teleport while combat-tagged.");return true;}
@@ -564,29 +588,43 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak")); return true;
         }
         if(n.equals("kit")) {
-            if(!(s instanceof Player p)) return true;
+            if(!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
             if(a.length >= 2 && a[0].equalsIgnoreCase("create")) {
-                if(!isDev(p)) { tell(p,"&cOnly the owner can create kits."); return true; }
-                String kitName=String.join("_",Arrays.copyOfRange(a,1,a.length)).toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", "");
+                if(!isDev(p)) { tell(p,"&cOnly the owner can create global kits."); return true; }
+                String kitName=normalizeKitName(String.join("_",Arrays.copyOfRange(a,1,a.length)));
                 if(kitName.isBlank()) { tell(p,"&cUse /kit create <name>"); return true; }
-                getConfig().set("kits."+kitName+".contents", p.getInventory().getContents());
+                if(getConfig().contains("kits."+kitName)) { tell(p,"&cThat kit already exists. Use /kit upload "+kitName+" to replace its contents."); return true; }
+                getConfig().set("kits."+kitName+".contents", new ItemStack[41]);
                 getConfig().set("kits."+kitName+".cooldown-seconds", 0); saveConfig();
-                tell(p,"&aSaved kit &f"+kitName+" &afrom your current inventory."); return true;
+                tell(p,"&aCreated kit &f"+kitName+"&a. Hold the inventory you want and use &f/kit upload "+kitName+"&a."); return true;
             }
-            if(a.length==2 && a[0].equalsIgnoreCase("delete")) {
-                if(!isDev(p)) { tell(p,"&cOnly the owner can delete kits."); return true; }
-                String kitName=a[1].toLowerCase(Locale.ROOT);
+            if(a.length >= 2 && a[0].equalsIgnoreCase("delete")) {
+                if(!isDev(p)) { tell(p,"&cOnly the owner can delete global kits."); return true; }
+                String kitName=normalizeKitName(a[1]);
                 if(!getConfig().contains("kits."+kitName)) { tell(p,"&cThat kit does not exist."); return true; }
                 getConfig().set("kits."+kitName,null); saveConfig(); tell(p,"&aDeleted kit &f"+kitName+"&a."); return true;
             }
+            if(a.length >= 2 && a[0].equalsIgnoreCase("upload")) {
+                if(!isDev(p)) { tell(p,"&cOnly the owner can upload global kits."); return true; }
+                String kitName=normalizeKitName(a[1]);
+                if(!getConfig().contains("kits."+kitName)) { tell(p,"&cCreate the kit first with /kit create "+kitName+"."); return true; }
+                ItemStack[] uploaded=p.getInventory().getContents();
+                for(int i=0;i<uploaded.length;i++) if(isDuelItem(uploaded[i]) || isKitEditor(uploaded[i])) uploaded[i]=null;
+                getConfig().set("kits."+kitName+".contents", uploaded);
+                getConfig().set("kits."+kitName+".armor", p.getInventory().getArmorContents());
+                getConfig().set("kits."+kitName+".offhand", p.getInventory().getItemInOffHand());
+                saveConfig(); tell(p,"&aUploaded your current inventory to kit &f"+kitName+"&a."); return true;
+            }
+            if(a.length==1 && a[0].equalsIgnoreCase("editor")) { openKitMenu(p,"editor",null); return true; }
             if(a.length==0) { openKitMenu(p, "claim", null); return true; }
-            String kit=a[0]; ConfigurationSection sec=getConfig().getConfigurationSection("kits."+kit);
+            String kit=normalizeKitName(a[0]); ConfigurationSection sec=getConfig().getConfigurationSection("kits."+kit);
             if(sec==null){tell(p,"&cUnknown kit. Use /kit to view available kits.");return true;}
             long cd=sec.getLong("cooldown-seconds",30)*1000L, now=System.currentTimeMillis(), next=kitCooldowns.getOrDefault(p.getUniqueId(),0L);
             if(next>now){tell(p,"&cWait "+((next-now+999)/1000)+"s before using a kit again.");return true;}
-            if(sec.isList("contents")) { List<?> items=sec.getList("contents"); for(int i=0;i<Math.min(items.size(),p.getInventory().getSize());i++) if(items.get(i) instanceof ItemStack item) p.getInventory().setItem(i,item.clone()); }
-            else for(String entry:sec.getStringList("items")){String[] parts=entry.split(":");Material m=Material.matchMaterial(parts[0]);if(m==null)continue;int amount=parts.length>1?Integer.parseInt(parts[1]):1;p.getInventory().addItem(new ItemStack(m,Math.max(1,Math.min(amount,m.getMaxStackSize()))));}
-            kitCooldowns.put(p.getUniqueId(),now+cd);tell(p,"&dKit claimed: &f"+kit); return true;
+            if(sec.isList("contents")) { List<?> items=sec.getList("contents"); p.getInventory().clear(); for(int i=0;i<Math.min(items.size(),p.getInventory().getSize());i++) if(items.get(i) instanceof ItemStack item) p.getInventory().setItem(i,item.clone()); }
+            if(sec.isList("armor")) { List<?> armor=sec.getList("armor"); ItemStack[] arr=new ItemStack[armor.size()]; for(int i=0;i<armor.size();i++) if(armor.get(i) instanceof ItemStack it) arr[i]=it.clone(); p.getInventory().setArmorContents(arr); }
+            ItemStack off=sec.getItemStack("offhand"); if(off!=null) p.getInventory().setItemInOffHand(off.clone());
+            kitCooldowns.put(p.getUniqueId(),now+cd);tell(p,"&dKit claimed: &f"+kit); giveDuelItem(p); giveKitEditor(p); return true;
         }
         if(n.equals("duel")) {
             if(!(s instanceof Player p)||a.length<1){tell(s,"Use /duel <player>");return true;} Player target=Bukkit.getPlayerExact(a[0]);
@@ -654,20 +692,77 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ItemStack item=new ItemStack(material); ItemMeta meta=item.getItemMeta(); if(meta!=null){meta.setDisplayName(c(name)); if(lore!=null)meta.setLore(lore.stream().map(this::c).toList()); item.setItemMeta(meta);} return item;
     }
     private void openKitMenu(Player p, String mode, String target) {
-        Inventory inv=Bukkit.createInventory(null,54,c("&5&lAzurPvP &8» &dSelect a kit"));
-        ConfigurationSection kits=getConfig().getConfigurationSection("kits"); int slot=0;
-        if(kits!=null) for(String key:kits.getKeys(false)) { if(slot>=45)break; inv.setItem(slot++,namedItem(Material.IRON_SWORD,"&d"+key,List.of("&7Click to select this kit"))); }
-        if(slot==0) inv.setItem(22,namedItem(Material.BARRIER,"&cNo kits created",List.of("&7Owner: use /kit create <name>")));
+        Inventory inv=Bukkit.createInventory(null,54,c(mode.equals("editor") ? "&5&lAzurPvP &8» &dKit Editor" : "&5&lAzurPvP &8» &dSelect a Kit"));
+        ConfigurationSection kits=getConfig().getConfigurationSection("kits");
+        int[] slots=new int[45]; int[] centered={10,12,14,16,19,21,23,25,31}; int si=0;
+        for(int value:centered) slots[si++]=value;
+        for(int value=0;value<45;value++) { boolean used=false; for(int center:centered) if(center==value) { used=true; break; } if(!used) slots[si++]=value; }
+        int index=0;
+        if(kits!=null) for(String key:kits.getKeys(false)) {
+            if(index>=slots.length) break;
+            Material icon=kitIcon(key);
+            inv.setItem(slots[index++],namedItem(icon,"&d&l"+prettyKitName(key),List.of(mode.equals("editor")?"&7Click to edit your personal version":"&7Click to select this kit")));
+        }
+        if(index==0) inv.setItem(22,namedItem(Material.BARRIER,"&cNo kits created",List.of("&7Owner: use /kit create <name>")));
         duelGuiMode.put(p.getUniqueId(), mode); if(target!=null)duelTargets.put(p.getUniqueId(),target);
         p.openInventory(inv);
     }
-    private void openDuelSettings(Player p) {
-        Inventory inv=Bukkit.createInventory(null,27,c("&5&lDuel Settings"));
-        inv.setItem(10,namedItem(Material.PAPER,"&dRounds: &f"+duelRounds.getOrDefault(p.getUniqueId(),3),List.of("&7Click to cycle 1, 3, 5, 7")));
-        inv.setItem(13,namedItem(Material.MAP,"&dMap: &f"+duelMaps.getOrDefault(p.getUniqueId(),"random"),List.of("&7Click to cycle configured maps")));
-        inv.setItem(16,namedItem(Material.LIME_CONCRETE,"&aSend Duel Request",List.of("&7Send settings to your opponent")));
-        p.openInventory(inv); duelGuiMode.put(p.getUniqueId(),"settings");
+    private void openKitEditInventory(Player p, String kit) {
+        Inventory inv=Bukkit.createInventory(null,54,c("&5&lEditing: &d"+prettyKitName(kit)));
+        String path="player-kits."+p.getUniqueId()+"."+kit+".contents";
+        List<?> contents=getConfig().getList(path);
+        if(contents==null) contents=getConfig().getList("kits."+kit+".contents");
+        if(contents!=null) for(int i=0;i<Math.min(45,contents.size());i++) if(contents.get(i) instanceof ItemStack it) inv.setItem(i,it.clone());
+        List<?> armor=getConfig().getList("player-kits."+p.getUniqueId()+"."+kit+".armor");
+        if(armor==null) armor=getConfig().getList("kits."+kit+".armor");
+        if(armor!=null) for(int i=0;i<Math.min(4,armor.size());i++) if(armor.get(i) instanceof ItemStack it) inv.setItem(45+i,it.clone());
+        inv.setItem(49,namedItem(Material.LIME_DYE,"&a&lSave Kit",List.of("&7Save this personal kit")));
+        inv.setItem(53,namedItem(Material.REDSTONE,"&c&lReset",List.of("&7Reset to the server's original kit")));
+        duelGuiMode.put(p.getUniqueId(),"editing"); duelChosenKits.put(p.getUniqueId(),kit); p.openInventory(inv);
     }
+    private void saveEditedKit(Player p, Inventory inv) {
+        String kit=duelChosenKits.get(p.getUniqueId()); if(kit==null)return;
+        ItemStack[] contents=new ItemStack[45]; for(int i=0;i<45;i++){ItemStack it=inv.getItem(i);contents[i]=it==null?null:it.clone();}
+        ItemStack[] armor=new ItemStack[4]; for(int i=0;i<4;i++){ItemStack it=inv.getItem(45+i);armor[i]=it==null?null:it.clone();}
+        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".contents",contents);
+        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".armor",armor); saveConfig();
+        p.closeInventory(); tell(p,"&aSaved your personal version of &f"+prettyKitName(kit)+"&a.");
+    }
+    private void resetEditedKit(Player p) {
+        String kit=duelChosenKits.get(p.getUniqueId()); if(kit==null)return;
+        getConfig().set("player-kits."+p.getUniqueId()+"."+kit,null); saveConfig(); openKitEditInventory(p,kit); tell(p,"&eYour personal kit was reset to the server default.");
+    }
+    private String normalizeKitName(String name) { return name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", ""); }
+    private String prettyKitName(String key) { return Arrays.stream(key.replace('_',' ').split(" ")).filter(x->!x.isBlank()).map(x->Character.toUpperCase(x.charAt(0))+x.substring(1)).reduce((a,b)->a+" "+b).orElse(key); }
+    private Material kitIcon(String key) { return switch(key.toLowerCase(Locale.ROOT)) {
+        case "sword" -> Material.DIAMOND_SWORD; case "axe" -> Material.DIAMOND_AXE; case "mace" -> Material.MACE;
+        case "spear_mace" -> Material.MACE; case "diamond_pot" -> Material.SPLASH_POTION; case "neth_pot" -> Material.SPLASH_POTION;
+        case "uhc" -> Material.GOLDEN_APPLE; case "diamond_smp" -> Material.DIAMOND_CHESTPLATE; case "vanilla" -> Material.IRON_SWORD;
+        default -> Material.CHEST;
+    }; }
+    private void ensureDefaultKits() {
+        String[] names={"sword","axe","mace","spear_mace","diamond_pot","neth_pot","uhc","diamond_smp","vanilla"};
+        for(String name:names) if(!getConfig().contains("kits."+name)) {
+            ItemStack[] contents=new ItemStack[41]; ItemStack[] armor=new ItemStack[4];
+            switch(name) {
+                case "sword" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.SHIELD); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
+                case "axe" -> { contents[0]=new ItemStack(Material.DIAMOND_AXE); contents[1]=new ItemStack(Material.SHIELD); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
+                case "mace","spear_mace" -> { contents[0]=new ItemStack(Material.MACE); contents[1]=new ItemStack(Material.WIND_CHARGE,16); contents[2]=new ItemStack(Material.ENDER_PEARL,8); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); }
+                case "diamond_pot" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); contents[3]=new ItemStack(Material.GOLDEN_APPLE,16); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
+                case "neth_pot" -> { contents[0]=new ItemStack(Material.NETHERITE_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); armor[0]=new ItemStack(Material.NETHERITE_BOOTS); armor[1]=new ItemStack(Material.NETHERITE_LEGGINGS); armor[2]=new ItemStack(Material.NETHERITE_CHESTPLATE); armor[3]=new ItemStack(Material.NETHERITE_HELMET); }
+                case "uhc" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.BOW); contents[2]=new ItemStack(Material.ARROW,32); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); contents[4]=new ItemStack(Material.WATER_BUCKET); contents[5]=new ItemStack(Material.LAVA_BUCKET); }
+                case "diamond_smp" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.DIAMOND_PICKAXE); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
+                default -> { contents[0]=new ItemStack(Material.IRON_SWORD); contents[1]=new ItemStack(Material.BOW); contents[2]=new ItemStack(Material.ARROW,32); contents[3]=new ItemStack(Material.COOKED_BEEF,16); }
+            }
+            getConfig().set("kits."+name+".contents",contents); getConfig().set("kits."+name+".armor",armor); getConfig().set("kits."+name+".cooldown-seconds",0);
+        }
+        saveConfig();
+    }
+    private void giveKitEditor(Player p) {
+        ItemStack book=namedItem(Material.BOOK,"&d&lKit editor",List.of("&7Click to edit your personal kits"));
+        p.getInventory().setItem(7,book);
+    }
+    private boolean isKitEditor(ItemStack item) { return item!=null && item.getType()==Material.BOOK && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&d&lKit editor").equals(item.getItemMeta().getDisplayName()); }
     private boolean isDuelItem(ItemStack item) { return item!=null && item.getType()==Material.IRON_SWORD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && DUEL_ITEM_NAME.equals(item.getItemMeta().getDisplayName()); }
     private void giveDuelItem(Player p) {
         ItemStack sword = null;
@@ -678,19 +773,31 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (sword == null) sword = namedItem(Material.IRON_SWORD, DUEL_ITEM_NAME, List.of("§7Right or left click to choose a kit"));
         p.getInventory().setItem(0, sword);
     }
-    @EventHandler public void onDuelItemUse(PlayerInteractEvent e) { if(isDuelItem(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); } }
-    @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()))e.setCancelled(true); }
+    @EventHandler public void onDuelItemUse(PlayerInteractEvent e) {
+        if (isDuelItem(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); return; }
+        if (isKitEditor(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"editor",null); }
+    }
+    @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()) || isKitEditor(e.getItemDrop().getItemStack()))e.setCancelled(true); }
     @EventHandler public void onDuelInventoryClick(InventoryClickEvent e) {
         if(!(e.getWhoClicked() instanceof Player p))return;
-        if(isDuelItem(e.getCurrentItem()) || isDuelItem(e.getCursor())) { e.setCancelled(true); return; }
+        if(isDuelItem(e.getCurrentItem()) || isDuelItem(e.getCursor()) || isKitEditor(e.getCurrentItem()) || isKitEditor(e.getCursor())) { e.setCancelled(true); return; }
         String title=ChatColor.stripColor(e.getView().getTitle());
-        if(title==null || (!title.contains("Select a kit")&&!title.contains("Duel Settings")))return;
+        if(title==null)return;
+        if(title.startsWith("Editing:")) {
+            if(e.getClickedInventory()!=e.getView().getTopInventory()) { e.setCancelled(true); return; }
+            if(e.getSlot()==49) { e.setCancelled(true); saveEditedKit(p,e.getView().getTopInventory()); return; }
+            if(e.getSlot()==53) { e.setCancelled(true); resetEditedKit(p); return; }
+            if(e.getSlot()>=45) { e.setCancelled(true); return; }
+            return;
+        }
+        if (!title.contains("Select a Kit") && !title.contains("Kit Editor") && !title.contains("Duel Settings")) return;
         e.setCancelled(true); if(e.getClickedInventory()==null||e.getClickedInventory()!=e.getView().getTopInventory())return;
         ItemStack item=e.getCurrentItem(); if(item==null||!item.hasItemMeta()||!item.getItemMeta().hasDisplayName())return;
         String display=ChatColor.stripColor(item.getItemMeta().getDisplayName());
-        if(title.contains("Select a kit")) {
+        if(title.contains("Kit Editor")) { String kit=normalizeKitName(display); if(getConfig().contains("kits."+kit)) openKitEditInventory(p,kit); return; }
+        if(title.contains("Select a Kit")) {
             if(item.getType()==Material.BARRIER)return;
-            String kit=display; if(!getConfig().contains("kits."+kit))return;
+            String kit=normalizeKitName(display); if(!getConfig().contains("kits."+kit))return;
             String mode=duelGuiMode.getOrDefault(p.getUniqueId(),"queue");
             if(mode.equals("duel")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.putIfAbsent(p.getUniqueId(),3); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
             else if(mode.equals("challenge")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.putIfAbsent(p.getUniqueId(),3); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
@@ -701,9 +808,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             else if(e.getSlot()==16) { String targetName=duelTargets.get(p.getUniqueId()); Player target=targetName==null?null:Bukkit.getPlayerExact(targetName); if(target==null){p.closeInventory();tell(p,"&cYour opponent is no longer online.");return;} duelRequests.put(target.getUniqueId(),p.getUniqueId()); p.closeInventory(); tell(p,"&dDuel request sent to &f"+target.getName()+"&d. Kit: &f"+duelChosenKits.getOrDefault(p.getUniqueId(),"default")+"&d, rounds: &f"+duelRounds.getOrDefault(p.getUniqueId(),3)+"&d, map: &f"+duelMaps.getOrDefault(p.getUniqueId(),"random")); tell(target,"&d"+p.getName()+" challenged you! Use &f/accept "+p.getName()+"&d."); }
         }
     }
-    @EventHandler public void onDuelInventoryDrag(InventoryDragEvent e) { String title=ChatColor.stripColor(e.getView().getTitle()); if(title!=null&&(title.contains("Select a kit")||title.contains("Duel Settings")))e.setCancelled(true); }
-    @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); }
-    @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Bukkit.getScheduler().runTask(this,()->giveDuelItem(e.getPlayer())); }
+    @EventHandler public void onDuelInventoryDrag(InventoryDragEvent e) { String title=ChatColor.stripColor(e.getView().getTitle()); if(title!=null&&(title.contains("Select a Kit")||title.contains("Kit Editor")||title.contains("Duel Settings")||title.startsWith("Editing:"))) { if(title.startsWith("Editing:") && e.getRawSlots().stream().allMatch(slot -> slot < 45)) return; e.setCancelled(true); } }
+    @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); giveKitEditor(e.getPlayer()); }
+    @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Bukkit.getScheduler().runTask(this,()->{giveDuelItem(e.getPlayer());giveKitEditor(e.getPlayer());}); }
     @EventHandler public void onDuelDeath(PlayerDeathEvent e) { e.getDrops().removeIf(this::isDuelItem); }
 
     @Override public List<String> onTabComplete(CommandSender s, Command cmd, String alias, String[] args) {
@@ -717,7 +824,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (args.length == 1) return List.of("create", "delete").stream().filter(v -> v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
             if (args.length == 2 && args[0].equalsIgnoreCase("delete")) return Bukkit.getWorlds().stream().map(World::getName).filter(v -> v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
         }
-        if(cmd.getName().equalsIgnoreCase("kit") && args.length==1){ List<String> choices=new ArrayList<>(List.of("create","delete")); ConfigurationSection ks=getConfig().getConfigurationSection("kits"); if(ks!=null)choices.addAll(ks.getKeys(false)); return choices.stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList(); }
+        if(cmd.getName().equalsIgnoreCase("kit") && args.length==1){ List<String> choices=new ArrayList<>(List.of("create","delete","upload")); ConfigurationSection ks=getConfig().getConfigurationSection("kits"); if(ks!=null)choices.addAll(ks.getKeys(false)); return choices.stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList(); }
+        if(cmd.getName().equalsIgnoreCase("kit") && args.length==2 && Set.of("delete","upload").contains(args[0].toLowerCase(Locale.ROOT))){ ConfigurationSection ks=getConfig().getConfigurationSection("kits"); return ks==null?Collections.emptyList():ks.getKeys(false).stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList(); }
         return Collections.emptyList();
     }
 }
