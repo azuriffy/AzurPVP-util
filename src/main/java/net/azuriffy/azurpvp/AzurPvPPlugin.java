@@ -20,7 +20,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.boss.*;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
-import org.bukkit.scoreboard.NumberFormat;
 import org.bukkit.event.player.PlayerCommandSendEvent;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -167,8 +166,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (objective == null) objective = board.registerNewObjective("azurpvp", "dummy", c("&5&lAZUR&d&lPVP"));
         objective.setDisplayName(c("&5&lAZUR&d&lPVP"));
         objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
-        // Suppress the vanilla red score numbers at the right edge of the sidebar.
-        objective.setNumberFormat(NumberFormat.blank());
         String role = roleOf(p.getUniqueId());
         String[] lines = {
             "&7Online: &d" + Bukkit.getOnlinePlayers().size(),
@@ -188,7 +185,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         for (int i = 0; i < lines.length; i++) {
             String unique = c(lines[i]) + ChatColor.values()[i].toString();
             objective.getScore(unique).setScore(score--);
-            objective.getScore(unique).setNumberFormat(NumberFormat.blank());
         }
         p.setScoreboard(board);
     }
