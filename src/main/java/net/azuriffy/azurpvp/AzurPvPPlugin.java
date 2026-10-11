@@ -66,7 +66,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         saveDefaultConfig();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tphere", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tphere", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -171,7 +171,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     private void updateAzurTabAndScoreboard(Player p) {
-        p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7LONDON &8| &f1.21.11+\n"), "");
+        p.setPlayerListHeaderFooter(
+            c("\n&6&lAZURPVP\n&eLONDON &8| &f1.21.11+\n"),
+            c("\n&7Players: &6" + Bukkit.getOnlinePlayers().size() + "\n"
+                + "&7Your ping: &a" + p.getPing() + "ms\n"
+                + "&d/discord &8| &d/store &8| &d/website\n")
+        );
 
         Scoreboard board = p.getScoreboard();
         if (board == Bukkit.getScoreboardManager().getMainScoreboard()) { board = Bukkit.getScoreboardManager().getNewScoreboard(); p.setScoreboard(board); updateTabRole(p); board = p.getScoreboard(); }
@@ -184,7 +189,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         try {
             Class<?> numberFormatClass = Class.forName("org.bukkit.scoreboard.NumberFormat");
             Object blankFormat = numberFormatClass.getMethod("blank").invoke(null);
-            org.bukkit.scoreboard.Objective.class.getMethod("setNumberFormat", numberFormatClass).invoke(objective, blankFormat);
+            try {
+                org.bukkit.scoreboard.Objective.class.getMethod("numberFormat", numberFormatClass).invoke(objective, blankFormat);
+            } catch (NoSuchMethodException missingSetter) {
+                org.bukkit.scoreboard.Objective.class.getMethod("setNumberFormat", numberFormatClass).invoke(objective, blankFormat);
+            }
         } catch (ReflectiveOperationException ignored) { }
         String role = roleOf(p.getUniqueId());
         String[] lines = {
@@ -492,7 +501,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     created.setSpawnLocation(0, Math.max(created.getMinHeight() + 1, 64), 0);
                     getConfig().set("void-worlds." + worldName, true);
                     saveConfig();
-                    tell(s, "&aCreated void world &f" + worldName + "&a. Use /world delete " + worldName + " to remove it.");
+                    if (s instanceof Player creatorPlayer) {
+                        creatorPlayer.teleport(new Location(created, 0.5, 64.0, 0.5));
+                        tell(creatorPlayer, "&aCreated void world &f" + worldName + "&a and teleported you to it.");
+                    } else {
+                        tell(s, "&aCreated void world &f" + worldName + "&a.");
+                    }
+                    tell(s, "&7Use &f/tp world " + worldName + "&7 to return to its coordinates 0,0.");
                 } catch (Exception ex) {
                     getLogger().warning("Could not create void world '" + worldName + "': " + ex.getMessage());
                     tell(s, "&cCould not create world. Check the server console.");
@@ -518,6 +533,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 return true;
             }
             tell(s, "&cUsage: /world create <name> or /world delete <name>"); return true;
+        }
+        if (n.equals("tp")) {
+            if (!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
+            if (!isDev(p)) { tell(p, "&cOnly the owner can use /tp world."); return true; }
+            if (a.length != 2 || !a[0].equalsIgnoreCase("world")) {
+                tell(p, "&cUsage: /tp world <worldname>"); return true;
+            }
+            World destination = Bukkit.getWorld(a[1]);
+            if (destination == null) { tell(p, "&cThat world is not loaded."); return true; }
+            p.teleport(new Location(destination, 0.5, Math.max(64, destination.getMinHeight() + 1), 0.5));
+            tell(p, "&dTeleported to &f" + destination.getName() + " &dat coordinates &f0,0&d.");
+            return true;
         }
         if(n.equals("setspawn")) {
             if(!(s instanceof Player p)) {tell(s,"&cPlayers only.");return true;} if(!isDev(p)){tell(s,"&cNo permission.");return true;}
@@ -642,7 +669,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         p.openInventory(inv); duelGuiMode.put(p.getUniqueId(),"settings");
     }
     private boolean isDuelItem(ItemStack item) { return item!=null && item.getType()==Material.IRON_SWORD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && DUEL_ITEM_NAME.equals(item.getItemMeta().getDisplayName()); }
-    private void giveDuelItem(Player p) { for(ItemStack item:p.getInventory().getContents()) if(isDuelItem(item))return; ItemStack sword=namedItem(Material.IRON_SWORD,DUEL_ITEM_NAME,List.of("§7Right or left click to choose a kit")); p.getInventory().setItem(8,sword); }
+    private void giveDuelItem(Player p) {
+        ItemStack sword = null;
+        for (int i = 0; i < p.getInventory().getSize(); i++) {
+            ItemStack item = p.getInventory().getItem(i);
+            if (isDuelItem(item)) { sword = item; if (i != 0) p.getInventory().setItem(i, null); break; }
+        }
+        if (sword == null) sword = namedItem(Material.IRON_SWORD, DUEL_ITEM_NAME, List.of("§7Right or left click to choose a kit"));
+        p.getInventory().setItem(0, sword);
+    }
     @EventHandler public void onDuelItemUse(PlayerInteractEvent e) { if(isDuelItem(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); } }
     @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()))e.setCancelled(true); }
     @EventHandler public void onDuelInventoryClick(InventoryClickEvent e) {
@@ -674,6 +709,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @Override public List<String> onTabComplete(CommandSender s, Command cmd, String alias, String[] args) {
         if(args.length==1 && Set.of("duel","accept","msg","reply","ignore","heal","feed","freeze","stats").contains(cmd.getName().toLowerCase(Locale.ROOT)))
             return Bukkit.getOnlinePlayers().stream().map(Player::getName).filter(n->n.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        if(cmd.getName().equalsIgnoreCase("tp")) {
+            if (args.length == 1) return List.of("world").stream().filter(v -> v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+            if (args.length == 2 && args[0].equalsIgnoreCase("world")) return Bukkit.getWorlds().stream().map(World::getName).filter(v -> v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
+        }
         if(cmd.getName().equalsIgnoreCase("world")) {
             if (args.length == 1) return List.of("create", "delete").stream().filter(v -> v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
             if (args.length == 2 && args[0].equalsIgnoreCase("delete")) return Bukkit.getWorlds().stream().map(World::getName).filter(v -> v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
