@@ -3,9 +3,13 @@ name: Build AzurPvP Tools
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -13,26 +17,47 @@ permissions:
 
 jobs:
   build:
+    name: Compile Minecraft Plugin
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 21
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
 
+      - name: Find Maven project
+        id: project
+        shell: bash
+        run: |
+          POM=$(find . -name pom.xml \
+            -not -path '*/target/*' \
+            -not -path '*/.git/*' \
+            -print -quit)
+
+          if [ -z "$POM" ]; then
+            echo "ERROR: No pom.xml found in the repository."
+            exit 1
+          fi
+
+          echo "pom=$POM" >> "$GITHUB_OUTPUT"
+          echo "Found Maven project: $POM"
+
       - name: Build with Maven
-        run: mvn --batch-mode clean package
+        run: mvn -B -f "${{ steps.project.outputs.pom }}" clean package
 
       - name: Upload plugin JAR
         uses: actions/upload-artifact@v4
         with:
-          name: AzurPvP-util
-          path: target/*.jar
+          name: AzurPvP-Tools
+          path: |
+            **/target/*.jar
+            !**/original-*.jar
           if-no-files-found: error
+          retention-days: 14
 ```
