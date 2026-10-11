@@ -180,7 +180,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             "&dDiscord: &7Soon",
             "&dStore: &7Soon"
         };
-        for (String entry : new HashSet<>(objective.getEntries())) objective.getScore(entry).resetScore();
+        for (String entry : new HashSet<>(board.getEntries())) objective.getScore(entry).resetScore();
         int score = lines.length;
         for (int i = 0; i < lines.length; i++) {
             String unique = c(lines[i]) + ChatColor.values()[i].toString();
