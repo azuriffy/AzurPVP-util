@@ -157,8 +157,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     private void updateAzurTabAndScoreboard(Player p) {
-        p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7LONDON &8| &f1.21.11+\n"),
-                c("\n&dDiscord: &7Coming soon\n&dStore: &7Coming soon\n&8"));
+        p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7LONDON &8| &f1.21.11+\n"), "");
 
         Scoreboard board = p.getScoreboard();
         if (board == Bukkit.getScoreboardManager().getMainScoreboard()) { board = Bukkit.getScoreboardManager().getNewScoreboard(); p.setScoreboard(board); updateTabRole(p); board = p.getScoreboard(); }
@@ -166,19 +165,22 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (objective == null) objective = board.registerNewObjective("azurpvp", "dummy", c("&5&lAZUR&d&lPVP"));
         objective.setDisplayName(c("&5&lAZUR&d&lPVP"));
         objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+        // Hide vanilla sidebar score numbers on Paper versions that support NumberFormat,
+        // using reflection so this source still compiles against older API artifacts.
+        try {
+            Class<?> numberFormatClass = Class.forName("org.bukkit.scoreboard.NumberFormat");
+            Object blankFormat = numberFormatClass.getMethod("blank").invoke(null);
+            objective.getClass().getMethod("setNumberFormat", numberFormatClass).invoke(objective, blankFormat);
+        } catch (ReflectiveOperationException ignored) { }
         String role = roleOf(p.getUniqueId());
         String[] lines = {
             "&7Online: &d" + Bukkit.getOnlinePlayers().size(),
             "&dPlayer: &f" + p.getName(),
-            "&dMode: &fPvP",
-            "&dWebsite: &7Coming soon",
             "&r ",
             "&dServer: &fLondon",
             "&dYour role: " + rolePrefix(role),
             "&r  ",
-            "&dDuel: &f/duel <player>",
-            "&dDiscord: &7Soon",
-            "&dStore: &7Soon"
+            "&dDuel: &f/duel <player>"
         };
         for (String entry : new HashSet<>(board.getEntries())) objective.getScore(entry).resetScore();
         int score = lines.length;
@@ -382,7 +384,32 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (!isDev(p)) { tell(p, "&cOnly the Owner can change gamemodes. Use /gmsp if you are Admin or above."); return; }
             if (root.equals("gmc")) p.setGameMode(GameMode.CREATIVE);
             else if (root.equals("gms")) p.setGameMode(GameMode.SURVIVAL);
-            else if (!args.isBlank()) { try { p.setGameMode(GameMode.valueOf(args.split("\\s+")[0].toUpperCase(Locale.ROOT))); } catch (IllegalArgumentException ex) { tell(p, "&cUse survival, creative, adventure, or spectator."); } }
+            else {
+                String[] gmArgs = args.isBlank() ? new String[0] : args.trim().split("\\s+");
+                if (gmArgs.length < 1 || gmArgs.length > 2) {
+                    tell(p, "&cUsage: /gamemode <mode> [player]");
+                    return;
+                }
+                GameMode mode;
+                try {
+                    mode = switch (gmArgs[0].toLowerCase(Locale.ROOT)) {
+                        case "s", "survival" -> GameMode.SURVIVAL;
+                        case "c", "creative" -> GameMode.CREATIVE;
+                        case "a", "adventure" -> GameMode.ADVENTURE;
+                        case "sp", "spectator" -> GameMode.SPECTATOR;
+                        default -> throw new IllegalArgumentException();
+                    };
+                } catch (IllegalArgumentException ex) {
+                    tell(p, "&cUse survival, creative, adventure, or spectator.");
+                    return;
+                }
+                Player target = gmArgs.length == 2 ? Bukkit.getPlayerExact(gmArgs[1]) : p;
+                if (target == null) { tell(p, "&cThat player is not online."); return; }
+                target.setGameMode(mode);
+                tell(p, "&dSet &f" + target.getName() + "&d's gamemode to &f" + mode.name().toLowerCase(Locale.ROOT) + "&d.");
+                if (!target.equals(p)) tell(target, "&dYour gamemode was set to &f" + mode.name().toLowerCase(Locale.ROOT) + "&d by &f" + p.getName() + "&d.");
+                return;
+            }
             tell(p, "&dGamemode updated."); return;
         }
         if ((root.equals("ban") || root.equals("tempban") || root.equals("timeout") || root.equals("unban")) && !can(p, "moderation")) { e.setCancelled(true); tell(p, "&cAdmin or Owner required."); return; }
@@ -473,7 +500,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(n.equals("back")) { if(!(s instanceof Player p))return true; Location l=lastLocations.get(p.getUniqueId()); if(l==null){tell(p,"&cNo previous location saved.");return true;} if(tagged(p)){tell(p,"&cYou cannot use /back during combat.");return true;} p.teleport(l);tell(p,"&dReturned to your previous location.");return true; }
         if(n.equals("tphere")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(!(s instanceof Player p)||a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}t.teleport(p);tell(s,"&dTeleported "+t.getName()+" to you.");return true; }
-        if(n.equals("gamemode")) { if(!isDev(s)){tell(s,"&cOnly Owner can use /gamemode. Admins may use /gmsp.");return true;} if(!(s instanceof Player p)||a.length<1)return true;try{p.setGameMode(GameMode.valueOf(a[0].toUpperCase(Locale.ROOT)));tell(p,"&dGamemode changed.");}catch(Exception ex){tell(p,"&cUse survival, creative, adventure, or spectator.");}return true; }
+        if(n.equals("gamemode")) {
+            if(!isDev(s)){tell(s,"&cOnly Owner can use /gamemode. Admins may use /gmsp.");return true;}
+            if(a.length < 1 || a.length > 2){tell(s,"&cUsage: /gamemode <mode> [player]");return true;}
+            GameMode mode;
+            try { mode = switch(a[0].toLowerCase(Locale.ROOT)) { case "s","survival" -> GameMode.SURVIVAL; case "c","creative" -> GameMode.CREATIVE; case "a","adventure" -> GameMode.ADVENTURE; case "sp","spectator" -> GameMode.SPECTATOR; default -> throw new IllegalArgumentException(); }; }
+            catch(Exception ex){tell(s,"&cUse survival, creative, adventure, or spectator.");return true;}
+            Player target = a.length == 2 ? Bukkit.getPlayerExact(a[1]) : (s instanceof Player p ? p : null);
+            if(target == null){tell(s, a.length == 2 ? "&cThat player is not online." : "&cFrom console, specify a player: /gamemode <mode> <player>");return true;}
+            target.setGameMode(mode); tell(s,"&dSet &f"+target.getName()+"&d's gamemode to &f"+mode.name().toLowerCase(Locale.ROOT)+"&d.");
+            if(!(s instanceof Player p) || !target.equals(p)) tell(target,"&dYour gamemode was set to &f"+mode.name().toLowerCase(Locale.ROOT)+"&d.");
+            return true;
+        }
         if(n.equals("speed")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(!(s instanceof Player p)||a.length<1)return true;try{float v=Math.max(0.1f,Math.min(10f,Float.parseFloat(a[0]))/10f);if(p.isFlying())p.setFlySpeed(v);else p.setWalkSpeed(v);tell(p,"&dSpeed updated.");}catch(Exception ex){tell(p,"&cUsage: /speed <1-10>");}return true; }
         if(n.equals("clear")) { if(!(s instanceof Player p))return true; p.getInventory().clear();tell(p,"&dInventory cleared.");return true; }
         if(n.equals("repair")) { if(!(s instanceof Player p))return true;ItemStack it=p.getInventory().getItemInMainHand();if(it.getType()==Material.AIR||it.getType().getMaxDurability()==0){tell(p,"&cHold a damageable item.");return true;}it.setDurability((short)0);tell(p,"&dItem repaired.");return true; }
