@@ -20,6 +20,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.boss.*;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
+import org.bukkit.scoreboard.NumberFormat;
 import org.bukkit.event.player.PlayerCommandSendEvent;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -58,6 +59,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         getServer().getPluginManager().registerEvents(this, this);
         combatTask = Bukkit.getScheduler().runTaskTimer(this, this::updateCombat, 1L, 10L);
+        Bukkit.getScheduler().runTaskTimer(this, () -> { for (Player online : Bukkit.getOnlinePlayers()) { updateTabRole(online); updateAzurTabAndScoreboard(online); } }, 20L, 20L);
         // Bootstrap: migrate the old owner role to owner and grant the first operator owner if none exists.
         migrateAndEnsureRoles();
         Bukkit.getScheduler().runTask(this, () -> {
@@ -89,7 +91,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ensureRole("helper", "staff", "&a&lHELPER", 3);
         ensureRole("creator", "member", "&d&lCREATOR", 4);
         ensureRole("azur+", "member", "&5&lAZUR+", 5);
-        ensureRole("member", "member", "&dMEMBER", 6);
+        ensureRole("member", "member", "&f&lMEMBER", 6);
         if (roles.getConfigurationSection("users") != null) {
             for (String id : roles.getConfigurationSection("users").getKeys(false)) {
                 if ("owner".equalsIgnoreCase(roles.getString("users."+id+".role", ""))) roles.set("users."+id+".role", "owner");
@@ -113,7 +115,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         roles.set(path + ".order", order);
         roles.set(path + ".rgb", switch(role) {
             case "owner" -> "177,156,217"; case "admin" -> "255,0,0"; case "mod" -> "144,213,255";
-            case "helper" -> "144,238,144"; case "creator" -> "255,192,203"; case "azur+" -> "128,0,128"; default -> "239,198,245";
+            case "helper" -> "144,238,144"; case "creator" -> "255,105,180"; case "azur+" -> "128,0,128"; default -> "239,198,245";
         });
     }
     private void saveRoles() { try { if (roles != null && rolesFile != null) roles.save(rolesFile); } catch (Exception ex) { getLogger().warning("Could not save roles.yml: "+ex.getMessage()); } }
@@ -136,64 +138,74 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private String rolePrefix(String role) { return c(roles.getString("roles."+role+".prefix", "&dMEMBER")); }
     private void updateTabRole(Player p) {
-        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
-        String role = roleOf(p.getUniqueId());
-        if (!roleExists(role)) role = "member";
-        String teamName = String.format(Locale.ROOT, "%02d_%s", roles.getInt("roles."+role+".order", 6), role.replaceAll("[^a-zA-Z0-9_]", ""));
-        Team team = board.getTeam(teamName);
-        if (team == null) team = board.registerNewTeam(teamName);
-        team.setPrefix(rolePrefix(role) + c(" &f"));
-        try { team.setColor(ChatColor.getByChar(colorCode(role))); } catch (Exception ignored) {}
-        for (Team other : board.getTeams()) if (other != team && other.hasEntry(p.getName())) other.removeEntry(p.getName());
-        if (!team.hasEntry(p.getName())) team.addEntry(p.getName());
+        Scoreboard board = p.getScoreboard();
+        if (board == Bukkit.getScoreboardManager().getMainScoreboard()) {
+            board = Bukkit.getScoreboardManager().getNewScoreboard();
+            p.setScoreboard(board);
+        }
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            String role = roleOf(online.getUniqueId());
+            if (!roleExists(role)) role = "member";
+            String teamName = String.format(Locale.ROOT, "%02d_%s", roles.getInt("roles."+role+".order", 6), role.replaceAll("[^a-zA-Z0-9_]", ""));
+            Team team = board.getTeam(teamName);
+            if (team == null) team = board.registerNewTeam(teamName);
+            team.setPrefix(rolePrefix(role) + c(" &f"));
+            try { team.setColor(ChatColor.getByChar(colorCode(role))); } catch (Exception ignored) {}
+            for (Team other : board.getTeams()) if (other != team && other.hasEntry(online.getName())) other.removeEntry(online.getName());
+            if (!team.hasEntry(online.getName())) team.addEntry(online.getName());
+        }
         p.setScoreboard(board);
     }
-    private void updateAzurTabAndScoreboard(Player p) {
-        // AzurPvP-themed tab header/footer. Links are intentionally blank until supplied.
-        p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7LONDON &8| &f1.21.11+\n"),
-                c("\n&dDiscord: &7Coming soon\n&dStore: &7Coming soon\n&8play.azurpvp.com\n"));
 
-        // A shared sidebar keeps the role teams on the main scoreboard so TAB sorting remains intact.
-        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+    private void updateAzurTabAndScoreboard(Player p) {
+        p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7LONDON &8| &f1.21.11+\n"),
+                c("\n&dDiscord: &7Coming soon\n&dStore: &7Coming soon\n&8"));
+
+        Scoreboard board = p.getScoreboard();
+        if (board == Bukkit.getScoreboardManager().getMainScoreboard()) { board = Bukkit.getScoreboardManager().getNewScoreboard(); p.setScoreboard(board); updateTabRole(p); board = p.getScoreboard(); }
         org.bukkit.scoreboard.Objective objective = board.getObjective("azurpvp");
         if (objective == null) objective = board.registerNewObjective("azurpvp", "dummy", c("&5&lAZUR&d&lPVP"));
         objective.setDisplayName(c("&5&lAZUR&d&lPVP"));
         objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+        // Suppress the vanilla red score numbers at the right edge of the sidebar.
+        objective.setNumberFormat(NumberFormat.blank());
+        String role = roleOf(p.getUniqueId());
         String[] lines = {
-            "&8&m----------------",
             "&7Online: &d" + Bukkit.getOnlinePlayers().size(),
+            "&dPlayer: &f" + p.getName(),
             "&dMode: &fPvP",
-            "&dWebsite: &fComing soon",
+            "&dWebsite: &7Coming soon",
             "&r ",
             "&dServer: &fLondon",
+            "&dYour role: " + rolePrefix(role),
             "&r  ",
+            "&dDuel: &f/duel <player>",
             "&dDiscord: &7Soon",
-            "&dStore: &7Soon",
-            "&8&m----------------"
+            "&dStore: &7Soon"
         };
-        // Unique invisible suffixes prevent duplicate scoreboard entries.
-        for (String entry : new ArrayList<>(board.getEntries())) board.resetScores(entry);
+        for (String entry : new HashSet<>(objective.getEntries())) objective.getScore(entry).resetScore();
         int score = lines.length;
         for (int i = 0; i < lines.length; i++) {
-            String line = c(lines[i]) + ChatColor.values()[i].toString();
-            objective.getScore(line).setScore(score--);
+            String unique = c(lines[i]) + ChatColor.values()[i].toString();
+            objective.getScore(unique).setScore(score--);
+            objective.getScore(unique).setNumberFormat(NumberFormat.blank());
         }
         p.setScoreboard(board);
     }
 
     private char colorCode(String role) {
-        return switch(role) { case "owner", "creator", "member" -> 'd'; case "admin" -> 'c'; case "mod" -> 'b'; case "helper" -> 'a'; case "azur+" -> '5'; default -> 'f'; };
+        return switch(role) { case "owner" -> 'd'; case "admin" -> 'c'; case "mod" -> 'b'; case "helper" -> 'a'; case "creator" -> 'e'; case "azur+" -> '5'; default -> 'f'; };
     }
     @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
         Player p = e.getPlayer();
-        Set<String> restricted = Set.of("setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","tphere","whois","heal","feed","vanish","freeze","staffchat","role","arena");
+        Set<String> restricted = Set.of("setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","tphere","whois","heal","feed","vanish","freeze","staffchat","role","arena");
         if (isDev(p)) return;
         e.getCommands().removeIf(command -> restricted.contains(command.toLowerCase(Locale.ROOT).split(":")[0]) && !can(p, commandCategory(command)));
     }
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
             case "setspawn","maintenance","backup","role","arena" -> "owner";
-            case "ban","tempban","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
+            case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
             case "tphere" -> "teleport";
             default -> "member";
@@ -363,12 +375,36 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
     }
     @EventHandler public void onCommand(PlayerCommandPreprocessEvent e) {
-        Player p=e.getPlayer(); String root=e.getMessage().split(" ")[0].substring(1).toLowerCase(Locale.ROOT);
-        if(tagged(p) && getConfig().getBoolean("combat.prevent-commands",true) &&
-            getConfig().getStringList("combat.blocked-commands").stream().map(String::toLowerCase).anyMatch(root::equals)) {
-            e.setCancelled(true); tell(p,"&cYou cannot use that command while combat-tagged.");
+        Player p = e.getPlayer();
+        String[] pieces = e.getMessage().substring(1).split("\\s+", 2);
+        String root = pieces[0].toLowerCase(Locale.ROOT).replaceFirst("^minecraft:", "");
+        String args = pieces.length > 1 ? pieces[1] : "";
+        if (root.equals("r")) { e.setCancelled(true); if (args.isBlank()) tell(p, "&cUsage: /r <message>"); else replyToLast(p, args); return; }
+        if (root.equals("gmsp")) { e.setCancelled(true); if (!can(p, "moderation")) { tell(p, "&cAdmin or Owner required."); return; } p.setGameMode(GameMode.SPECTATOR); tell(p, "&dSpectator mode enabled silently."); return; }
+        if (root.equals("gmc") || root.equals("gms") || root.equals("gamemode")) {
+            e.setCancelled(true);
+            if (!isDev(p)) { tell(p, "&cOnly the Owner can change gamemodes. Use /gmsp if you are Admin or above."); return; }
+            if (root.equals("gmc")) p.setGameMode(GameMode.CREATIVE);
+            else if (root.equals("gms")) p.setGameMode(GameMode.SURVIVAL);
+            else if (!args.isBlank()) { try { p.setGameMode(GameMode.valueOf(args.split("\\s+")[0].toUpperCase(Locale.ROOT))); } catch (IllegalArgumentException ex) { tell(p, "&cUse survival, creative, adventure, or spectator."); } }
+            tell(p, "&dGamemode updated."); return;
+        }
+        if ((root.equals("ban") || root.equals("tempban") || root.equals("timeout") || root.equals("unban")) && !can(p, "moderation")) { e.setCancelled(true); tell(p, "&cAdmin or Owner required."); return; }
+        if (tagged(p) && getConfig().getBoolean("combat.prevent-commands", true) &&
+            getConfig().getStringList("combat.blocked-commands").stream().map(v -> v.toLowerCase(Locale.ROOT)).anyMatch(root::equals)) {
+            e.setCancelled(true); tell(p, "&cYou cannot use that command while combat-tagged.");
         }
     }
+
+    private void replyToLast(Player p, String message) {
+        UUID id = lastMessaged.get(p.getUniqueId());
+        Player to = id == null ? null : Bukkit.getPlayer(id);
+        if (to == null) { tell(p, "&cNobody to reply to."); return; }
+        tell(p, "&dTo " + to.getName() + ": &f" + message);
+        tell(to, "&dFrom " + p.getName() + ": &f" + message);
+        lastMessaged.put(to.getUniqueId(), p.getUniqueId());
+    }
+
     @EventHandler public void onRespawn(PlayerRespawnEvent e) {
         String worldName=getConfig().getString("spawn.world","");
         World w=Bukkit.getWorld(worldName);
@@ -427,10 +463,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             String msg=String.join(" ",Arrays.copyOfRange(a,1,a.length)); if(s instanceof Player from && ignored.getOrDefault(to.getUniqueId(),Set.of()).contains(from.getUniqueId())){tell(s,"&cThat player is ignoring you.");return true;}
             tell(s,"&dTo "+to.getName()+": &f"+msg);tell(to,"&dFrom "+s.getName()+": &f"+msg);if(s instanceof Player from)lastMessaged.put(to.getUniqueId(),from.getUniqueId());if(s instanceof Player from)lastMessaged.put(from.getUniqueId(),to.getUniqueId());return true;
         }
-        if(n.equals("reply")) {
-            if(!(s instanceof Player p)||a.length<1)return true;UUID id=lastMessaged.get(p.getUniqueId());Player to=id==null?null:Bukkit.getPlayer(id);if(to==null){tell(p,"&cNobody to reply to.");return true;}
-            String msg=String.join(" ",a);tell(p,"&dTo "+to.getName()+": &f"+msg);tell(to,"&dFrom "+p.getName()+": &f"+msg);lastMessaged.put(to.getUniqueId(),p.getUniqueId());return true;
-        }
+        if(n.equals("reply")) { if(!(s instanceof Player p)||a.length<1)return true; replyToLast(p, String.join(" ", a)); return true; }
         if(n.equals("ignore")) {
             if(!(s instanceof Player p)||a.length<1)return true;Player target=Bukkit.getPlayerExact(a[0]);if(target==null){tell(p,"&cPlayer not found.");return true;}
             Set<UUID> set=ignored.computeIfAbsent(p.getUniqueId(),id->ConcurrentHashMap.newKeySet());if(!set.add(target.getUniqueId())){set.remove(target.getUniqueId());tell(p,"&dStopped ignoring "+target.getName()+".");}else tell(p,"&dIgnoring "+target.getName()+".");return true;
@@ -444,13 +477,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(n.equals("back")) { if(!(s instanceof Player p))return true; Location l=lastLocations.get(p.getUniqueId()); if(l==null){tell(p,"&cNo previous location saved.");return true;} if(tagged(p)){tell(p,"&cYou cannot use /back during combat.");return true;} p.teleport(l);tell(p,"&dReturned to your previous location.");return true; }
         if(n.equals("tphere")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(!(s instanceof Player p)||a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}t.teleport(p);tell(s,"&dTeleported "+t.getName()+" to you.");return true; }
-        if(n.equals("gamemode")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(!(s instanceof Player p)||a.length<1)return true;try{p.setGameMode(GameMode.valueOf(a[0].toUpperCase(Locale.ROOT)));tell(p,"&dGamemode changed.");}catch(Exception ex){tell(p,"&cUse survival, creative, adventure, or spectator.");}return true; }
+        if(n.equals("gamemode")) { if(!isDev(s)){tell(s,"&cOnly Owner can use /gamemode. Admins may use /gmsp.");return true;} if(!(s instanceof Player p)||a.length<1)return true;try{p.setGameMode(GameMode.valueOf(a[0].toUpperCase(Locale.ROOT)));tell(p,"&dGamemode changed.");}catch(Exception ex){tell(p,"&cUse survival, creative, adventure, or spectator.");}return true; }
         if(n.equals("speed")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(!(s instanceof Player p)||a.length<1)return true;try{float v=Math.max(0.1f,Math.min(10f,Float.parseFloat(a[0]))/10f);if(p.isFlying())p.setFlySpeed(v);else p.setWalkSpeed(v);tell(p,"&dSpeed updated.");}catch(Exception ex){tell(p,"&cUsage: /speed <1-10>");}return true; }
         if(n.equals("clear")) { if(!(s instanceof Player p))return true; p.getInventory().clear();tell(p,"&dInventory cleared.");return true; }
         if(n.equals("repair")) { if(!(s instanceof Player p))return true;ItemStack it=p.getInventory().getItemInMainHand();if(it.getType()==Material.AIR||it.getType().getMaxDurability()==0){tell(p,"&cHold a damageable item.");return true;}it.setDurability((short)0);tell(p,"&dItem repaired.");return true; }
         if(n.equals("whois")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}tell(s,"&d"+t.getName()+" &7UUID: &f"+t.getUniqueId()+" &7Ping: &f"+t.getPing()+"ms &7Role: &f"+roleOf(t.getUniqueId()));return true; }
         if(n.equals("announce")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Bukkit.broadcastMessage(prefix()+c(String.join(" ",a)));return true; }
-        if(n.equals("maintenance")) { if(!isDev(s)){tell(s,"&cOwner role required.");return true;} boolean enabled=!getConfig().getBoolean("maintenance.enabled",false);getConfig().set("maintenance.enabled",enabled);saveConfig();tell(s,"&dMaintenance mode "+(enabled?"enabled":"disabled")+".");return true; }
+        if(n.equals("maintenance")) { if(!isDev(s)){tell(s,"&cOwner role required.");return true;} boolean enabled=!getConfig().getBoolean("maintenance.enabled",false);getConfig().set("maintenance.enabled",enabled);saveConfig(); if(enabled) for(Player online:Bukkit.getOnlinePlayers()) if(!isStaff(online)) online.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled.")); tell(s,"&dMaintenance mode "+(enabled?"enabled":"disabled")+".");return true; }
         if(n.equals("settings")) { if(!(s instanceof Player p))return true;tell(p,"&dUse config.yml to configure personal/server feature toggles in this build.");return true; }
         if(n.equals("playtime")) { if(!(s instanceof Player p))return true;long seconds=getStat(p.getUniqueId(),"playtime_seconds");tell(p,"&dPlaytime: &f"+(seconds/3600)+"h "+((seconds%3600)/60)+"m");return true; }
         if(n.equals("cps")) { tell(s,"&7CPS monitoring is not active in this build; use a dedicated anti-cheat for enforcement.");return true; }
