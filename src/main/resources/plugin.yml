@@ -1,1 +1,34 @@
-
+name: AzurPvPUtils
+version: 1.0.0
+main: net.azuriffy.azurpvp.AzurPvPPlugin
+api-version: '1.21'
+authors: [azuriffy]
+description: Purple-and-black modern PvP utilities for Paper 1.21.11.
+softdepend: [LuckPerms, PlaceholderAPI, Vault]
+commands:
+  azurpvp: {description: AzurPvP admin and help command, usage: /azurpvp}
+  spawn: {description: Teleport to the PvP spawn}
+  setspawn: {description: Set the PvP spawn, permission: azurpvp.admin}
+  stats: {description: View PvP statistics, usage: /stats [player]}
+  kit: {description: Receive a configured starter kit, usage: /kit [name]}
+  duel: {description: Challenge a player, usage: /duel <player>}
+  accept: {description: Accept a duel challenge, usage: /accept <player>}
+  msg: {description: Send a private message, usage: /msg <player> <message>}
+  reply: {description: Reply to a private message, usage: /reply <message>}
+  ignore: {description: Ignore or unignore a player, usage: /ignore <player>}
+  rules: {description: Show server rules}
+  discord: {description: Show Discord link}
+  ping: {description: Show your latency}
+  tps: {description: Show server TPS, permission: azurpvp.staff}
+  fly: {description: Toggle flight, permission: azurpvp.fly}
+  heal: {description: Heal a player, permission: azurpvp.staff}
+  feed: {description: Feed a player, permission: azurpvp.staff}
+  vanish: {description: Toggle vanish, permission: azurpvp.staff}
+  freeze: {description: Freeze or unfreeze a player, permission: azurpvp.staff}
+  report: {description: Report a player, usage: /report <player> <reason>}
+  staffchat: {description: Send a staff message, permission: azurpvp.staff}
+permissions:
+  azurpvp.admin: {default: op}
+  azurpvp.staff: {default: op}
+  azurpvp.fly: {default: op}
+  azurpvp.bypass.combattag: {default: op}
