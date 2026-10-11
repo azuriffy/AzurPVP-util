@@ -778,6 +778,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (isKitEditor(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"editor",null); }
     }
     @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()) || isKitEditor(e.getItemDrop().getItemStack()))e.setCancelled(true); }
+    private void openDuelSettings(Player p) {
+        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dDuel Settings"));
+        int rounds = duelRounds.getOrDefault(p.getUniqueId(), 3);
+        String map = duelMaps.getOrDefault(p.getUniqueId(), "random");
+        String kit = duelChosenKits.getOrDefault(p.getUniqueId(), "sword");
+        inv.setItem(10, namedItem(Material.PAPER, "&d&lRounds: &f" + rounds, List.of("&7Click to change rounds", "&71, 3, 5, or 7 rounds")));
+        inv.setItem(13, namedItem(Material.FILLED_MAP, "&d&lMap: &f" + map, List.of("&7Click to cycle available maps")));
+        inv.setItem(16, namedItem(Material.LIME_CONCRETE, "&a&lSend Duel Request", List.of("&7Kit: &f" + prettyKitName(kit), "&7Rounds: &f" + rounds, "&7Map: &f" + map)));
+        inv.setItem(22, namedItem(kitIcon(kit), "&dSelected Kit: &f" + prettyKitName(kit), List.of("&7Close this menu to cancel")));
+        p.openInventory(inv);
+    }
+
     @EventHandler public void onDuelInventoryClick(InventoryClickEvent e) {
         if(!(e.getWhoClicked() instanceof Player p))return;
         if(isDuelItem(e.getCurrentItem()) || isDuelItem(e.getCursor()) || isKitEditor(e.getCurrentItem()) || isKitEditor(e.getCursor())) { e.setCancelled(true); return; }
