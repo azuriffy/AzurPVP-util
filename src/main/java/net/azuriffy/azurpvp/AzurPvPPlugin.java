@@ -27,7 +27,6 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.potion.PotionType;
-import org.bukkit.potion.PotionData;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -762,7 +761,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             case "diamond_pot" -> {
                 ItemStack potion = new ItemStack(Material.POTION);
                 if (potion.getItemMeta() instanceof PotionMeta meta) {
-                    meta.setBasePotionData(new PotionData(PotionType.INSTANT_HEAL));
+                    meta.setBasePotionType(PotionType.HEALING);
                     potion.setItemMeta(meta);
                 }
                 yield potion;
