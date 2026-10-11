@@ -2,9 +2,9 @@ name: Build AzurPvP Plugin
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [main, master]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -13,23 +13,31 @@ permissions:
 jobs:
   build:
     name: Build Minecraft Plugin
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
 
+      - name: Verify project files
+        run: |
+          test -f pom.xml || { echo 'ERROR: pom.xml must be in the repository root.'; exit 1; }
+          test -d src/main/java || { echo 'ERROR: src/main/java folder is missing.'; exit 1; }
+
       - name: Build plugin with Maven
-        run: mvn --batch-mode --no-transfer-progress clean package
+        run: mvn --batch-mode --no-transfer-progress -e clean package
 
       - name: Upload compiled JAR
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AzurPvP-Utils-1.0.0
