@@ -61,7 +61,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         // Bootstrap: migrate the old owner role to owner and grant the first operator owner if none exists.
         migrateAndEnsureRoles();
         Bukkit.getScheduler().runTask(this, () -> {
-            for (Player online : Bukkit.getOnlinePlayers()) updateTabRole(online);
+            for (Player online : Bukkit.getOnlinePlayers()) { updateTabRole(online); updateAzurTabAndScoreboard(online); }
             if (roles.getConfigurationSection("users") == null || roles.getConfigurationSection("users").getKeys(false).stream().noneMatch(id -> "owner".equalsIgnoreCase(roles.getString("users."+id+".role","")))) {
                 Bukkit.getOnlinePlayers().stream().filter(Player::isOp).findFirst().ifPresent(p -> assignRole(p.getUniqueId(), p.getName(), "owner"));
             }
@@ -113,7 +113,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         roles.set(path + ".order", order);
         roles.set(path + ".rgb", switch(role) {
             case "owner" -> "177,156,217"; case "admin" -> "255,0,0"; case "mod" -> "144,213,255";
-            case "helper" -> "144,238,144"; case "creator" -> "255,192,203"; case "azur+" -> "128,0,128"; default -> "183,144,212";
+            case "helper" -> "144,238,144"; case "creator" -> "255,192,203"; case "azur+" -> "128,0,128"; default -> "239,198,245";
         });
     }
     private void saveRoles() { try { if (roles != null && rolesFile != null) roles.save(rolesFile); } catch (Exception ex) { getLogger().warning("Could not save roles.yml: "+ex.getMessage()); } }
@@ -148,6 +148,39 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (!team.hasEntry(p.getName())) team.addEntry(p.getName());
         p.setScoreboard(board);
     }
+    private void updateAzurTabAndScoreboard(Player p) {
+        // AzurPvP-themed tab header/footer. Links are intentionally blank until supplied.
+        p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7LONDON &8| &f1.21.11+\n"),
+                c("\n&dDiscord: &7Coming soon\n&dStore: &7Coming soon\n&8play.azurpvp.com\n"));
+
+        // A shared sidebar keeps the role teams on the main scoreboard so TAB sorting remains intact.
+        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+        org.bukkit.scoreboard.Objective objective = board.getObjective("azurpvp");
+        if (objective == null) objective = board.registerNewObjective("azurpvp", "dummy", c("&5&lAZUR&d&lPVP"));
+        objective.setDisplayName(c("&5&lAZUR&d&lPVP"));
+        objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+        String[] lines = {
+            "&8&m----------------",
+            "&7Online: &d" + Bukkit.getOnlinePlayers().size(),
+            "&dMode: &fPvP",
+            "&dWebsite: &fComing soon",
+            "&r ",
+            "&dServer: &fLondon",
+            "&r  ",
+            "&dDiscord: &7Soon",
+            "&dStore: &7Soon",
+            "&8&m----------------"
+        };
+        // Unique invisible suffixes prevent duplicate scoreboard entries.
+        for (String entry : new ArrayList<>(board.getEntries())) board.resetScores(entry);
+        int score = lines.length;
+        for (int i = 0; i < lines.length; i++) {
+            String line = c(lines[i]) + ChatColor.values()[i].toString();
+            objective.getScore(line).setScore(score--);
+        }
+        p.setScoreboard(board);
+    }
+
     private char colorCode(String role) {
         return switch(role) { case "owner", "creator", "member" -> 'd'; case "admin" -> 'c'; case "mod" -> 'b'; case "helper" -> 'a'; case "azur+" -> '5'; default -> 'f'; };
     }
@@ -286,6 +319,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler public void onJoin(PlayerJoinEvent e) {
         Player p=e.getPlayer(); ensurePlayer(p); if(!roleExists(roleOf(p.getUniqueId()))) assignRole(p.getUniqueId(),p.getName(),"member");
         updateTabRole(p);
+        updateAzurTabAndScoreboard(p);
         if (getConfig().getBoolean("maintenance.enabled", false) && !isStaff(p)) { Bukkit.getScheduler().runTask(this, () -> p.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled."))); return; }
         e.setJoinMessage(c("&8[&a+&8] &d" + p.getName()));
         p.sendTitle(c("&5&lAZUR&d&lPVP"), c("&7Welcome to the arena"), 10, 45, 15);
