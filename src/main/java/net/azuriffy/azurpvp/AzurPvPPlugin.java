@@ -25,6 +25,8 @@ import org.bukkit.event.player.*;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.PotionMeta;
+import org.bukkit.potion.PotionType;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -212,10 +214,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             sc.setScore(score--);
             // Paper exposes blank score-number formatting on Score. Use reflection for API compatibility.
             try {
+                // Invoke through the Score API interface (not the server's implementation class),
+                // otherwise the implementation's non-public class can make reflection fail.
                 Class<?> nf = Class.forName("org.bukkit.scoreboard.NumberFormat");
                 Object blank = nf.getMethod("blank").invoke(null);
-                try { sc.getClass().getMethod("numberFormat", nf).invoke(sc, blank); }
-                catch (NoSuchMethodException ex) { sc.getClass().getMethod("setNumberFormat", nf).invoke(sc, blank); }
+                try { org.bukkit.scoreboard.Score.class.getMethod("numberFormat", nf).invoke(sc, blank); }
+                catch (NoSuchMethodException ex) { org.bukkit.scoreboard.Score.class.getMethod("setNumberFormat", nf).invoke(sc, blank); }
             } catch (ReflectiveOperationException ignored) { }
         }
         p.setScoreboard(board);
@@ -232,7 +236,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
-            case "setspawn","maintenance","backup","role","arena","world" -> "owner";
+            case "setspawn","maintenance","backup","role","arena","world","tp" -> "owner";
             case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
             case "tphere" -> "teleport";
@@ -589,6 +593,21 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(n.equals("kit")) {
             if(!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
+            if(a.length == 1 && a[0].equalsIgnoreCase("clear")) {
+                boolean hasItems = false;
+                for (ItemStack item : p.getInventory().getContents()) if (item != null && item.getType() != Material.AIR) { hasItems = true; break; }
+                if (hasItems || p.getInventory().getHelmet() != null || p.getInventory().getChestplate() != null || p.getInventory().getLeggings() != null || p.getInventory().getBoots() != null || p.getInventory().getItemInOffHand().getType() != Material.AIR) {
+                    p.getInventory().clear();
+                    p.getInventory().setArmorContents(null);
+                    p.getInventory().setItemInOffHand(null);
+                    tell(p, "&aInventory cleared. Run &f/kit clear &aone more time to restore the Duel sword and Kit editor.");
+                } else {
+                    giveDuelItem(p);
+                    giveKitEditor(p);
+                    tell(p, "&dDuel sword and Kit editor restored.");
+                }
+                return true;
+            }
             if(a.length >= 2 && a[0].equalsIgnoreCase("create")) {
                 if(!isDev(p)) { tell(p,"&cOnly the owner can create global kits."); return true; }
                 String kitName=normalizeKitName(String.join("_",Arrays.copyOfRange(a,1,a.length)));
@@ -700,8 +719,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         int index=0;
         if(kits!=null) for(String key:kits.getKeys(false)) {
             if(index>=slots.length) break;
-            Material icon=kitIcon(key);
-            inv.setItem(slots[index++],namedItem(icon,"&d&l"+prettyKitName(key),List.of(mode.equals("editor")?"&7Click to edit your personal version":"&7Click to select this kit")));
+            ItemStack icon=kitIconItem(key);
+            ItemMeta iconMeta=icon.getItemMeta();
+            if(iconMeta!=null){ iconMeta.setDisplayName(c("&d&l"+prettyKitName(key))); iconMeta.setLore(List.of(c(mode.equals("editor")?"&7Click to edit your personal version":"&7Click to select this kit"))); icon.setItemMeta(iconMeta); }
+            inv.setItem(slots[index++],icon);
         }
         if(index==0) inv.setItem(22,namedItem(Material.BARRIER,"&cNo kits created",List.of("&7Owner: use /kit create <name>")));
         duelGuiMode.put(p.getUniqueId(), mode); if(target!=null)duelTargets.put(p.getUniqueId(),target);
@@ -734,12 +755,28 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private String normalizeKitName(String name) { return name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", ""); }
     private String prettyKitName(String key) { return Arrays.stream(key.replace('_',' ').split(" ")).filter(x->!x.isBlank()).map(x->Character.toUpperCase(x.charAt(0))+x.substring(1)).reduce((a,b)->a+" "+b).orElse(key); }
-    private Material kitIcon(String key) { return switch(key.toLowerCase(Locale.ROOT)) {
-        case "sword" -> Material.DIAMOND_SWORD; case "axe" -> Material.DIAMOND_AXE; case "mace" -> Material.MACE;
-        case "spear_mace" -> Material.MACE; case "diamond_pot" -> Material.SPLASH_POTION; case "neth_pot" -> Material.SPLASH_POTION;
-        case "uhc" -> Material.GOLDEN_APPLE; case "diamond_smp" -> Material.DIAMOND_CHESTPLATE; case "vanilla" -> Material.IRON_SWORD;
-        default -> Material.CHEST;
-    }; }
+    private ItemStack kitIconItem(String key) {
+        return switch (key.toLowerCase(Locale.ROOT)) {
+            case "spear_mace" -> new ItemStack(Material.SPEAR);
+            case "diamond_pot" -> {
+                ItemStack potion = new ItemStack(Material.POTION);
+                if (potion.getItemMeta() instanceof PotionMeta meta) {
+                    meta.setBasePotionType(PotionType.HEALING);
+                    potion.setItemMeta(meta);
+                }
+                yield potion;
+            }
+            case "neth_pot" -> new ItemStack(Material.NETHERITE_HELMET);
+            case "vanilla" -> new ItemStack(Material.END_CRYSTAL);
+            case "sword" -> new ItemStack(Material.DIAMOND_SWORD);
+            case "axe" -> new ItemStack(Material.DIAMOND_AXE);
+            case "mace" -> new ItemStack(Material.MACE);
+            case "uhc" -> new ItemStack(Material.GOLDEN_APPLE);
+            case "diamond_smp" -> new ItemStack(Material.DIAMOND_CHESTPLATE);
+            default -> new ItemStack(Material.CHEST);
+        };
+    }
+    private Material kitIcon(String key) { return kitIconItem(key).getType(); }
     private void ensureDefaultKits() {
         String[] names={"sword","axe","mace","spear_mace","diamond_pot","neth_pot","uhc","diamond_smp","vanilla"};
         for(String name:names) if(!getConfig().contains("kits."+name)) {
@@ -786,7 +823,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         inv.setItem(10, namedItem(Material.PAPER, "&d&lRounds: &f" + rounds, List.of("&7Click to change rounds", "&71, 3, 5, or 7 rounds")));
         inv.setItem(13, namedItem(Material.FILLED_MAP, "&d&lMap: &f" + map, List.of("&7Click to cycle available maps")));
         inv.setItem(16, namedItem(Material.LIME_CONCRETE, "&a&lSend Duel Request", List.of("&7Kit: &f" + prettyKitName(kit), "&7Rounds: &f" + rounds, "&7Map: &f" + map)));
-        inv.setItem(22, namedItem(kitIcon(kit), "&dSelected Kit: &f" + prettyKitName(kit), List.of("&7Close this menu to cancel")));
+        ItemStack selectedIcon=kitIconItem(kit);
+        ItemMeta selectedMeta=selectedIcon.getItemMeta();
+        if(selectedMeta!=null){ selectedMeta.setDisplayName(c("&dSelected Kit: &f"+prettyKitName(kit))); selectedMeta.setLore(List.of(c("&7Close this menu to cancel"))); selectedIcon.setItemMeta(selectedMeta); }
+        inv.setItem(22, selectedIcon);
         p.openInventory(inv);
     }
 
