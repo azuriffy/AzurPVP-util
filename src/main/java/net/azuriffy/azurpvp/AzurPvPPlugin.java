@@ -757,11 +757,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private String prettyKitName(String key) { return Arrays.stream(key.replace('_',' ').split(" ")).filter(x->!x.isBlank()).map(x->Character.toUpperCase(x.charAt(0))+x.substring(1)).reduce((a,b)->a+" "+b).orElse(key); }
     private ItemStack kitIconItem(String key) {
         return switch (key.toLowerCase(Locale.ROOT)) {
-            case "spear_mace" -> new ItemStack(Material.SPEAR);
+            case "spear_mace" -> new ItemStack(Material.DIAMOND_SPEAR);
             case "diamond_pot" -> {
                 ItemStack potion = new ItemStack(Material.POTION);
                 if (potion.getItemMeta() instanceof PotionMeta meta) {
-                    meta.setBasePotionType(PotionType.HEALING);
+                    meta.setBasePotionType(PotionType.INSTANT_HEAL);
                     potion.setItemMeta(meta);
                 }
                 yield potion;
