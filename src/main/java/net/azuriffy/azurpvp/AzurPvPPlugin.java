@@ -89,7 +89,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private void saveRoles() { try { if (roles != null && rolesFile != null) roles.save(rolesFile); } catch (Exception ex) { getLogger().warning("Could not save roles.yml: "+ex.getMessage()); } }
     private String roleOf(UUID id) { return roles.getString("users."+id+".role", "player").toLowerCase(Locale.ROOT); }
     private boolean hasRole(UUID id, String role) { return roleOf(id).equalsIgnoreCase(role); }
-    private boolean isDev(CommandSender s) { return s instanceof Player p && hasRole(p.getUniqueId(),"dev"); }
+    // Recovery path: server operators can manage roles even if first-run dev assignment was missed.
+    // This lets the owner run /role set <their-name> dev, then continue with the normal role system.
+    private boolean isDev(CommandSender s) { return s instanceof Player p && (p.isOp() || hasRole(p.getUniqueId(),"dev")); }
     private boolean isStaff(CommandSender s) {
         if (isDev(s)) return true;
         if (!(s instanceof Player p)) return true;
