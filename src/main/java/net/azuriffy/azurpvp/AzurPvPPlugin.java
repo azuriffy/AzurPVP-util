@@ -53,6 +53,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Map<UUID, Integer> duelRounds = new ConcurrentHashMap<>();
     private final Map<UUID, String> duelMaps = new ConcurrentHashMap<>();
     private final Map<UUID, String> duelGuiMode = new ConcurrentHashMap<>();
+    private final Map<UUID, UUID> activeDuels = new ConcurrentHashMap<>();
+    private final Set<UUID> duelCountdown = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> pendingDuelLosers = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Integer> duelArenaByPlayer = new ConcurrentHashMap<>();
     private static final String DUEL_ITEM_NAME = "§d§lDuel";
     private final Map<UUID, UUID> lastMessaged = new ConcurrentHashMap<>();
     private final Map<UUID, Set<UUID>> ignored = new ConcurrentHashMap<>();
@@ -75,7 +79,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tphere", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tphere", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "set")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -230,13 +234,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
         Player p = e.getPlayer();
-        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","tphere","whois","heal","feed","vanish","freeze","staffchat","role","arena");
+        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","tphere","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
         if (isDev(p)) return;
         e.getCommands().removeIf(command -> restricted.contains(command.toLowerCase(Locale.ROOT).split(":")[0]) && !can(p, commandCategory(command)));
     }
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
-            case "setspawn","maintenance","backup","role","arena","world","tp" -> "owner";
+            case "setspawn","maintenance","backup","role","arena","addarena","set","world","tp" -> "owner";
             case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
             case "tphere" -> "teleport";
@@ -400,7 +404,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         double dx=location.getX()-getConfig().getDouble("spawn.x"), dz=location.getZ()-getConfig().getDouble("spawn.z");
         return dx*dx+dz*dz <= 500.0*500.0;
     }
-    @EventHandler public void protectSpawnBlockBreak(BlockBreakEvent e) { if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); } }
+    @EventHandler public void protectSpawnBlockBreak(BlockBreakEvent e) {
+        if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); return; }
+        for(String key: arenaKeys()) { String path="arenas."+key; Location center=arenaCenter(key); if(center!=null && center.getWorld().equals(e.getBlock().getWorld()) && center.distanceSquared(e.getBlock().getLocation())<=10000.0) { boolean allowed=getConfig().getBoolean(path+".break-below-zero",false); if(!allowed || e.getBlock().getY()>=0) e.setCancelled(true); return; } }
+    }
     @EventHandler public void protectSpawnBlockPlace(BlockPlaceEvent e) { if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); } }
     @EventHandler public void protectSpawnInteractions(PlayerInteractEvent e) {
         if (e.getClickedBlock()==null || !inSpawnProtection(e.getClickedBlock().getLocation())) return;
@@ -411,6 +418,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void onDamage(org.bukkit.event.entity.EntityDamageByEntityEvent e) {
         if (e.getEntity() instanceof Player victim && e.getDamager() instanceof Player attacker) {
+            if (duelCountdown.contains(victim.getUniqueId()) || duelCountdown.contains(attacker.getUniqueId())) { e.setCancelled(true); return; }
             if (inSpawnProtection(victim.getLocation()) || inSpawnProtection(attacker.getLocation())) { e.setCancelled(true); return; }
             tag(victim); tag(attacker);
             if (god.contains(victim.getUniqueId())) e.setCancelled(true);
@@ -544,9 +552,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
             if (action.equals("delete")) {
                 World target = Bukkit.getWorld(worldName);
-                if (target == null) { tell(s, "&cThat world is not currently loaded."); return true; }
-                if (target.getName().equalsIgnoreCase("world") || target.getName().equalsIgnoreCase("world_nether") || target.getName().equalsIgnoreCase("world_the_end")) {
-                    tell(s, "&cYou cannot delete the server's default world with this command."); return true;
+                if (target == null && new File(Bukkit.getWorldContainer(), worldName).exists()) { try { target = Bukkit.createWorld(new WorldCreator(worldName)); } catch (Exception ignored) {} }
+                if (target == null) { tell(s, "&cThat world is not loaded and no matching world folder exists."); return true; }
+                if (target.getName().equalsIgnoreCase(Bukkit.getWorlds().get(0).getName())) {
+                    tell(s, "&cYou cannot delete the primary world. Nether and End can be deleted if they are not the primary world."); return true;
                 }
                 World fallback = Bukkit.getWorld(getConfig().getString("spawn.world", ""));
                 if (fallback == null || fallback.equals(target)) fallback = Bukkit.getWorlds().stream().filter(w -> !w.equals(target)).findFirst().orElse(null);
@@ -573,6 +582,22 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             p.teleport(new Location(destination, 0.5, Math.max(64, destination.getMinHeight() + 1), 0.5));
             tell(p, "&dTeleported to &f" + destination.getName() + " &dat coordinates &f0,0&d.");
             return true;
+        }
+        if(n.equals("addarena")) {
+            if(!isDev(s)){tell(s,"&cOnly the owner can create arenas.");return true;}
+            if(!(s instanceof Player p)||a.length!=2){tell(s,"&cUsage: /addarena <number> <true/false>");return true;}
+            int id; boolean mine; try{id=Integer.parseInt(a[0]); if(id<1)throw new NumberFormatException();}catch(NumberFormatException ex){tell(s,"&cArena number must be a positive integer.");return true;}
+            if(!a[1].equalsIgnoreCase("true")&&!a[1].equalsIgnoreCase("false")){tell(s,"&cUse true or false for block breaking.");return true;}
+            String path="arenas."+id; if(getConfig().contains(path)){tell(p,"&cArena "+id+" already exists. Each number can only be used once.");return true;}
+            Location l=p.getLocation(); getConfig().set(path+".world",l.getWorld().getName());getConfig().set(path+".x",l.getX());getConfig().set(path+".y",l.getY());getConfig().set(path+".z",l.getZ());getConfig().set(path+".break-below-zero",Boolean.parseBoolean(a[1]));getConfig().set(path+".spawn1",null);getConfig().set(path+".spawn2",null);saveConfig();
+            tell(p,"&aCreated arena "+id+" with a 100-block radius. Breaking is "+(Boolean.parseBoolean(a[1])?"allowed below Y=0":"disabled")+".");return true;
+        }
+        if(n.equals("set")) {
+            if(!isDev(s)){tell(s,"&cOnly the owner can configure arena spawns.");return true;}
+            if(!(s instanceof Player p)||a.length!=4||!a[0].equalsIgnoreCase("arena")||!a[1].equalsIgnoreCase("spawn")){tell(s,"&cUsage: /set arena spawn <arena number> <spawn 1|2>");return true;}
+            int id,which;try{id=Integer.parseInt(a[2]);which=Integer.parseInt(a[3]);}catch(NumberFormatException ex){tell(s,"&cArena and spawn numbers must be integers.");return true;}
+            if(which<1||which>2||!getConfig().contains("arenas."+id)){tell(p,"&cArena does not exist or spawn must be 1 or 2.");return true;}
+            Location l=p.getLocation();String path="arenas."+id+".spawn"+which;getConfig().set(path+".world",l.getWorld().getName());getConfig().set(path+".x",l.getX());getConfig().set(path+".y",l.getY());getConfig().set(path+".z",l.getZ());getConfig().set(path+".yaw",l.getYaw());getConfig().set(path+".pitch",l.getPitch());saveConfig();tell(p,"&aSaved arena "+id+" spawn "+which+".");return true;
         }
         if(n.equals("setspawn")) {
             if(!(s instanceof Player p)) {tell(s,"&cPlayers only.");return true;} if(!isDev(p)){tell(s,"&cNo permission.");return true;}
@@ -626,13 +651,14 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(a.length >= 2 && a[0].equalsIgnoreCase("upload")) {
                 if(!isDev(p)) { tell(p,"&cOnly the owner can upload global kits."); return true; }
                 String kitName=normalizeKitName(a[1]);
-                if(!getConfig().contains("kits."+kitName)) { tell(p,"&cCreate the kit first with /kit create "+kitName+"."); return true; }
+                if(kitName.isBlank()) { tell(p,"&cUse /kit upload <name>"); return true; }
+                if(!getConfig().contains("kits."+kitName)) getConfig().set("kits."+kitName+".cooldown-seconds", 0);
                 ItemStack[] uploaded=p.getInventory().getContents();
                 for(int i=0;i<uploaded.length;i++) if(isDuelItem(uploaded[i]) || isKitEditor(uploaded[i])) uploaded[i]=null;
                 getConfig().set("kits."+kitName+".contents", uploaded);
                 getConfig().set("kits."+kitName+".armor", p.getInventory().getArmorContents());
                 getConfig().set("kits."+kitName+".offhand", p.getInventory().getItemInOffHand());
-                saveConfig(); tell(p,"&aUploaded your current inventory to kit &f"+kitName+"&a."); return true;
+                saveConfig(); reloadConfig(); tell(p,"&aUploaded and saved server-default kit &f"+kitName+"&a to config.yml. It will survive plugin updates that keep the server config."); return true;
             }
             if(a.length==1 && a[0].equalsIgnoreCase("editor")) { openKitMenu(p,"editor",null); return true; }
             if(a.length==0) { openKitMenu(p, "claim", null); return true; }
@@ -640,9 +666,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(sec==null){tell(p,"&cUnknown kit. Use /kit to view available kits.");return true;}
             long cd=sec.getLong("cooldown-seconds",30)*1000L, now=System.currentTimeMillis(), next=kitCooldowns.getOrDefault(p.getUniqueId(),0L);
             if(next>now){tell(p,"&cWait "+((next-now+999)/1000)+"s before using a kit again.");return true;}
-            if(sec.isList("contents")) { List<?> items=sec.getList("contents"); p.getInventory().clear(); for(int i=0;i<Math.min(items.size(),p.getInventory().getSize());i++) if(items.get(i) instanceof ItemStack item) p.getInventory().setItem(i,item.clone()); }
-            if(sec.isList("armor")) { List<?> armor=sec.getList("armor"); ItemStack[] arr=new ItemStack[armor.size()]; for(int i=0;i<armor.size();i++) if(armor.get(i) instanceof ItemStack it) arr[i]=it.clone(); p.getInventory().setArmorContents(arr); }
-            ItemStack off=sec.getItemStack("offhand"); if(off!=null) p.getInventory().setItemInOffHand(off.clone());
+            String personal="player-kits."+p.getUniqueId()+"."+kit;
+            List<?> items=getConfig().getList(personal+".contents"); if(items==null) items=sec.getList("contents");
+            p.getInventory().clear(); if(items!=null) for(int i=0;i<Math.min(items.size(),p.getInventory().getSize());i++) if(items.get(i) instanceof ItemStack item) p.getInventory().setItem(i,item.clone());
+            List<?> armor=getConfig().getList(personal+".armor"); if(armor==null) armor=sec.getList("armor");
+            if(armor!=null) { ItemStack[] arr=new ItemStack[4]; for(int i=0;i<Math.min(4,armor.size());i++) if(armor.get(i) instanceof ItemStack it) arr[i]=it.clone(); p.getInventory().setArmorContents(arr); }
+            ItemStack off=getConfig().getItemStack(personal+".offhand"); if(off==null) off=sec.getItemStack("offhand"); if(off!=null) p.getInventory().setItemInOffHand(off.clone());
             kitCooldowns.put(p.getUniqueId(),now+cd);tell(p,"&dKit claimed: &f"+kit); giveDuelItem(p); giveKitEditor(p); return true;
         }
         if(n.equals("duel")) {
@@ -653,7 +682,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("accept")) {
             if(!(s instanceof Player p)||a.length<1)return true; UUID challenger=duelRequests.remove(p.getUniqueId()); Player from=challenger==null?null:Bukkit.getPlayer(challenger);
             if(from==null||!from.getName().equalsIgnoreCase(a[0])){tell(p,"&cNo matching duel request.");return true;}
-            tell(p,"&dDuel accepted. &7Kit: &f"+duelChosenKits.getOrDefault(from.getUniqueId(),"default")+" &7| rounds: &f"+duelRounds.getOrDefault(from.getUniqueId(),3)+" &7| map: &f"+duelMaps.getOrDefault(from.getUniqueId(),"random"));tell(from,"&d"+p.getName()+" accepted your duel request. &7Arena teleporting still requires an arena configured by the server owner.");return true;
+            startDuel(from,p); return true;
         }
         if(n.equals("msg")) {
             if(a.length<2){tell(s,"Use /msg <player> <message>");return true;} Player to=Bukkit.getPlayerExact(a[0]);if(to==null){tell(s,"&cPlayer not found.");return true;}
@@ -710,6 +739,31 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private ItemStack namedItem(Material material, String name, List<String> lore) {
         ItemStack item=new ItemStack(material); ItemMeta meta=item.getItemMeta(); if(meta!=null){meta.setDisplayName(c(name)); if(lore!=null)meta.setLore(lore.stream().map(this::c).toList()); item.setItemMeta(meta);} return item;
     }
+    private List<String> arenaKeys() { ConfigurationSection sec=getConfig().getConfigurationSection("arenas"); if(sec==null)return Collections.emptyList(); return new ArrayList<>(sec.getKeys(false)); }
+    private Location arenaCenter(String id) { String path="arenas."+id; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z")); }
+    private Location arenaSpawn(String id,int n) { String path="arenas."+id+".spawn"+n; if(!getConfig().contains(path+".world"))return null; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z"),(float)getConfig().getDouble(path+".yaw"),(float)getConfig().getDouble(path+".pitch")); }
+    private void startDuel(Player first,Player second) {
+        String arena=null; for(String id:arenaKeys()) if(arenaSpawn(id,1)!=null&&arenaSpawn(id,2)!=null) { arena=id; break; }
+        if(arena==null) { tell(first,"&cNo usable arena: every arena needs spawn 1 and spawn 2. Configure another arena first.");tell(second,"&cDuel cancelled: no arena has both spawns configured.");return; }
+        if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return; }
+        activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),Integer.parseInt(arena));duelArenaByPlayer.put(second.getUniqueId(),Integer.parseInt(arena)); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
+        first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
+        giveDuelKit(first,duelChosenKits.getOrDefault(first.getUniqueId(),"sword"));giveDuelKit(second,duelChosenKits.getOrDefault(first.getUniqueId(),"sword"));first.teleport(arenaSpawn(arena,1));second.teleport(arenaSpawn(arena,2));
+        tell(first,"&dDuel starting in 5 seconds!");tell(second,"&dDuel starting in 5 seconds!");
+        for(int sec=4;sec>=1;sec--){final int n=sec;Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);}},(5-sec)*20L);}
+        Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){duelCountdown.remove(first.getUniqueId());duelCountdown.remove(second.getUniqueId());first.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);second.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);}},100L);
+        tell(first,"&aDuel accepted: &f"+second.getName()+" &7| Arena "+arena+" | 1 round");tell(second,"&aDuel accepted: &f"+first.getName()+" &7| Arena "+arena+" | 1 round");
+    }
+    private void giveDuelKit(Player p,String kit) {
+        String path="player-kits."+p.getUniqueId()+"."+kit; if(!getConfig().contains("kits."+kit)){kit="sword";path="kits.sword";} else if(getConfig().contains(path+".contents")){} else path="kits."+kit;
+        List<?> contents=getConfig().getList(path+".contents");p.getInventory().clear();if(contents!=null)for(int i=0;i<Math.min(36,contents.size());i++)if(contents.get(i) instanceof ItemStack it)p.getInventory().setItem(i,it.clone());
+        List<?> armor=getConfig().getList(path+".armor");if(armor!=null){ItemStack[] arr=new ItemStack[4];for(int i=0;i<Math.min(4,armor.size());i++)if(armor.get(i) instanceof ItemStack it)arr[i]=it.clone();p.getInventory().setArmorContents(arr);} ItemStack off=getConfig().getItemStack(path+".offhand");if(off!=null)p.getInventory().setItemInOffHand(off.clone());
+    }
+    private void finishDuel(Player winner,Player loser) {
+        if(winner==null||loser==null)return; activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
+        winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);pendingDuelLosers.add(loser.getUniqueId());if(loser.isOnline()&&!loser.isDead())loser.setGameMode(GameMode.SPECTATOR);
+        Bukkit.getScheduler().runTaskLater(this,()->{String sw=getConfig().getString("spawn.world","");World world=Bukkit.getWorld(sw);if(world!=null){Location l=new Location(world,getConfig().getDouble("spawn.x"),getConfig().getDouble("spawn.y"),getConfig().getDouble("spawn.z"),(float)getConfig().getDouble("spawn.yaw"),(float)getConfig().getDouble("spawn.pitch"));loser.setGameMode(GameMode.SURVIVAL);loser.teleport(l);} if(winner.isOnline()) {winner.setGameMode(GameMode.SURVIVAL);String sw2=getConfig().getString("spawn.world","");World w2=Bukkit.getWorld(sw2);if(w2!=null)winner.teleport(new Location(w2,getConfig().getDouble("spawn.x"),getConfig().getDouble("spawn.y"),getConfig().getDouble("spawn.z")));} if(loser.isOnline()){pendingDuelLosers.remove(loser.getUniqueId());giveDuelItem(loser);giveKitEditor(loser);}if(winner.isOnline()){giveDuelItem(winner);giveKitEditor(winner);}},100L);
+    }
     private void openKitMenu(Player p, String mode, String target) {
         Inventory inv=Bukkit.createInventory(null,54,c(mode.equals("editor") ? "&5&lAzurPvP &8» &dKit Editor" : "&5&lAzurPvP &8» &dSelect a Kit"));
         ConfigurationSection kits=getConfig().getConfigurationSection("kits");
@@ -737,7 +791,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         List<?> armor=getConfig().getList("player-kits."+p.getUniqueId()+"."+kit+".armor");
         if(armor==null) armor=getConfig().getList("kits."+kit+".armor");
         if(armor!=null) for(int i=0;i<Math.min(4,armor.size());i++) if(armor.get(i) instanceof ItemStack it) inv.setItem(45+i,it.clone());
-        inv.setItem(49,namedItem(Material.LIME_DYE,"&a&lSave Kit",List.of("&7Save this personal kit")));
+        ItemStack offhand=getConfig().getItemStack("player-kits."+p.getUniqueId()+"."+kit+".offhand");
+        if(offhand==null) offhand=getConfig().getItemStack("kits."+kit+".offhand");
+        inv.setItem(49,offhand==null?new ItemStack(Material.AIR):offhand.clone());
+        inv.setItem(51,namedItem(Material.LIME_DYE,"&a&lSave Kit",List.of("&7Save this personal kit")));
         inv.setItem(53,namedItem(Material.REDSTONE,"&c&lReset",List.of("&7Reset to the server's original kit")));
         duelGuiMode.put(p.getUniqueId(),"editing"); duelChosenKits.put(p.getUniqueId(),kit); p.openInventory(inv);
     }
@@ -745,8 +802,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String kit=duelChosenKits.get(p.getUniqueId()); if(kit==null)return;
         ItemStack[] contents=new ItemStack[45]; for(int i=0;i<45;i++){ItemStack it=inv.getItem(i);contents[i]=it==null?null:it.clone();}
         ItemStack[] armor=new ItemStack[4]; for(int i=0;i<4;i++){ItemStack it=inv.getItem(45+i);armor[i]=it==null?null:it.clone();}
+        ItemStack offhand=inv.getItem(49);
         getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".contents",contents);
-        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".armor",armor); saveConfig();
+        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".armor",armor);
+        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".offhand",offhand==null||offhand.getType()==Material.AIR?null:offhand.clone()); saveConfig();
         p.closeInventory(); tell(p,"&aSaved your personal version of &f"+prettyKitName(kit)+"&a.");
     }
     private void resetEditedKit(Player p) {
@@ -759,9 +818,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         return switch (key.toLowerCase(Locale.ROOT)) {
             case "spear_mace" -> new ItemStack(Material.DIAMOND_SPEAR);
             case "diamond_pot" -> {
-                ItemStack potion = new ItemStack(Material.POTION);
+                ItemStack potion = new ItemStack(Material.SPLASH_POTION);
                 if (potion.getItemMeta() instanceof PotionMeta meta) {
-                    meta.setBasePotionType(PotionType.HEALING);
+                    meta.setBasePotionType(PotionType.STRONG_HEALING);
                     potion.setItemMeta(meta);
                 }
                 yield potion;
@@ -817,7 +876,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()) || isKitEditor(e.getItemDrop().getItemStack()))e.setCancelled(true); }
     private void openDuelSettings(Player p) {
         Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dDuel Settings"));
-        int rounds = duelRounds.getOrDefault(p.getUniqueId(), 3);
+        int rounds = 1; duelRounds.put(p.getUniqueId(),1);
         String map = duelMaps.getOrDefault(p.getUniqueId(), "random");
         String kit = duelChosenKits.getOrDefault(p.getUniqueId(), "sword");
         inv.setItem(10, namedItem(Material.PAPER, "&d&lRounds: &f" + rounds, List.of("&7Click to change rounds", "&71, 3, 5, or 7 rounds")));
@@ -837,9 +896,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(title==null)return;
         if(title.startsWith("Editing:")) {
             if(e.getClickedInventory()!=e.getView().getTopInventory()) { e.setCancelled(true); return; }
-            if(e.getSlot()==49) { e.setCancelled(true); saveEditedKit(p,e.getView().getTopInventory()); return; }
+            if(e.getSlot()==51) { e.setCancelled(true); saveEditedKit(p,e.getView().getTopInventory()); return; }
             if(e.getSlot()==53) { e.setCancelled(true); resetEditedKit(p); return; }
-            if(e.getSlot()>=45) { e.setCancelled(true); return; }
+            if(e.getSlot()>=50) { e.setCancelled(true); return; }
             return;
         }
         if (!title.contains("Select a Kit") && !title.contains("Kit Editor") && !title.contains("Duel Settings")) return;
@@ -851,19 +910,22 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(item.getType()==Material.BARRIER)return;
             String kit=normalizeKitName(display); if(!getConfig().contains("kits."+kit))return;
             String mode=duelGuiMode.getOrDefault(p.getUniqueId(),"queue");
-            if(mode.equals("duel")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.putIfAbsent(p.getUniqueId(),3); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
-            else if(mode.equals("challenge")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.putIfAbsent(p.getUniqueId(),3); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
+            if(mode.equals("duel")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.put(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
+            else if(mode.equals("challenge")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.put(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
             else { p.closeInventory(); tell(p,"&dQueued with kit &f"+kit+"&d. &7Matchmaking requires an arena/queue system to be configured."); }
         } else {
-            if(e.getSlot()==10) { int[] values={1,3,5,7}; int current=duelRounds.getOrDefault(p.getUniqueId(),3), next=3; for(int i=0;i<values.length;i++)if(values[i]==current)next=values[(i+1)%values.length]; duelRounds.put(p.getUniqueId(),next); openDuelSettings(p); }
+            if(e.getSlot()==10) { duelRounds.put(p.getUniqueId(),1); openDuelSettings(p); }
             else if(e.getSlot()==13) { List<String> maps=getConfig().getStringList("duel.maps"); if(maps.isEmpty())maps=List.of("random"); String current=duelMaps.getOrDefault(p.getUniqueId(),"random"); int i=maps.indexOf(current); duelMaps.put(p.getUniqueId(),maps.get((i+1)%maps.size())); openDuelSettings(p); }
             else if(e.getSlot()==16) { String targetName=duelTargets.get(p.getUniqueId()); Player target=targetName==null?null:Bukkit.getPlayerExact(targetName); if(target==null){p.closeInventory();tell(p,"&cYour opponent is no longer online.");return;} duelRequests.put(target.getUniqueId(),p.getUniqueId()); p.closeInventory(); tell(p,"&dDuel request sent to &f"+target.getName()+"&d. Kit: &f"+duelChosenKits.getOrDefault(p.getUniqueId(),"default")+"&d, rounds: &f"+duelRounds.getOrDefault(p.getUniqueId(),3)+"&d, map: &f"+duelMaps.getOrDefault(p.getUniqueId(),"random")); tell(target,"&d"+p.getName()+" challenged you! Use &f/accept "+p.getName()+"&d."); }
         }
     }
-    @EventHandler public void onDuelInventoryDrag(InventoryDragEvent e) { String title=ChatColor.stripColor(e.getView().getTitle()); if(title!=null&&(title.contains("Select a Kit")||title.contains("Kit Editor")||title.contains("Duel Settings")||title.startsWith("Editing:"))) { if(title.startsWith("Editing:") && e.getRawSlots().stream().allMatch(slot -> slot < 45)) return; e.setCancelled(true); } }
+    @EventHandler public void onDuelInventoryDrag(InventoryDragEvent e) { String title=ChatColor.stripColor(e.getView().getTitle()); if(title!=null&&(title.contains("Select a Kit")||title.contains("Kit Editor")||title.contains("Duel Settings")||title.startsWith("Editing:"))) { if(title.startsWith("Editing:") && e.getRawSlots().stream().allMatch(slot -> slot < 50)) return; e.setCancelled(true); } }
     @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); giveKitEditor(e.getPlayer()); }
-    @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Bukkit.getScheduler().runTask(this,()->{giveDuelItem(e.getPlayer());giveKitEditor(e.getPlayer());}); }
-    @EventHandler public void onDuelDeath(PlayerDeathEvent e) { e.getDrops().removeIf(this::isDuelItem); }
+    @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Player p=e.getPlayer(); Bukkit.getScheduler().runTask(this,()->{if(pendingDuelLosers.contains(p.getUniqueId()))p.setGameMode(GameMode.SPECTATOR);else {giveDuelItem(p);giveKitEditor(p);}}); }
+    @EventHandler public void onDuelDeath(PlayerDeathEvent e) {
+        e.getDrops().removeIf(this::isDuelItem);
+        Player loser=e.getEntity(); UUID other=activeDuels.get(loser.getUniqueId()); if(other!=null){Player winner=Bukkit.getPlayer(other); Bukkit.getScheduler().runTask(this,()->finishDuel(winner,loser));}
+    }
 
     @Override public List<String> onTabComplete(CommandSender s, Command cmd, String alias, String[] args) {
         if(args.length==1 && Set.of("duel","accept","msg","reply","ignore","heal","feed","freeze","stats").contains(cmd.getName().toLowerCase(Locale.ROOT)))
