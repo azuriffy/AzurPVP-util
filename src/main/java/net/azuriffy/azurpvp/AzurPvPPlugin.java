@@ -99,6 +99,16 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public void onDisable() {
         if (combatTask != null) combatTask.cancel();
+        // Explicitly flush every loaded world before the plugin shuts down.
+        // Paper normally autosaves worlds, but this helps ensure edits are written during a clean stop.
+        for (World world : Bukkit.getWorlds()) {
+            try {
+                world.save();
+                getLogger().info("Saved world on plugin shutdown: " + world.getName());
+            } catch (Exception ex) {
+                getLogger().severe("Could not save world '" + world.getName() + "': " + ex.getMessage());
+            }
+        }
         saveRoles();
         combatBars.values().forEach(BossBar::removeAll);
         if (db != null) try { db.close(); } catch (SQLException ignored) {}
