@@ -15,6 +15,7 @@ import org.bukkit.attribute.Attribute;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
@@ -386,6 +387,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 p.sendActionBar(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(c("&5&lCOMBAT &8» &d" + ((until-now+999)/1000) + "s")));
             }
         }
+    }
+
+    // This server is PvP-only: block all living mob spawns in every loaded world, regardless of spawn reason.
+    @EventHandler public void blockAllMobSpawns(CreatureSpawnEvent e) {
+        e.setCancelled(true);
     }
 
     @EventHandler public void onJoin(PlayerJoinEvent e) {
@@ -791,8 +797,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private void startDuel(Player first,Player second) {
         String arena=null; for(String id:arenaKeys()) if(arenaSpawn(id,1)!=null&&arenaSpawn(id,2)!=null) { arena=id; break; }
         if(arena==null) { tell(first,"&cNo usable arena: every arena needs spawn 1 and spawn 2. Configure another arena first.");tell(second,"&cDuel cancelled: no arena has both spawns configured.");return; }
+        final String selectedArena = arena;
         if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return; }
-        activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),Integer.parseInt(arena));duelArenaByPlayer.put(second.getUniqueId(),Integer.parseInt(arena)); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
+        activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),Integer.parseInt(selectedArena));duelArenaByPlayer.put(second.getUniqueId(),Integer.parseInt(selectedArena)); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
         first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
         giveDuelKit(first,duelChosenKits.getOrDefault(first.getUniqueId(),"sword"));giveDuelKit(second,duelChosenKits.getOrDefault(second.getUniqueId(),"sword"));
         tell(first,"&aDuel accepted: &f"+second.getName()+"&a!"); tell(second,"&aDuel accepted: &f"+first.getName()+"&a!");
@@ -802,7 +809,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         for(int sec=3;sec>=1;sec--){final int n=sec; Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0);first.playSound(first.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);second.playSound(second.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);}},(4-sec)*20L);}
         Bukkit.getScheduler().runTaskLater(this,()->{
             if(!activeDuels.containsKey(first.getUniqueId())||!activeDuels.containsKey(second.getUniqueId())||!first.isOnline()||!second.isOnline())return;
-            first.teleport(arenaSpawn(arena,1)); second.teleport(arenaSpawn(arena,2));
+            first.teleport(arenaSpawn(selectedArena,1)); second.teleport(arenaSpawn(selectedArena,2));
             first.setHealth(first.getMaxHealth()); second.setHealth(second.getMaxHealth()); first.setFoodLevel(20); second.setFoodLevel(20);
             first.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0); second.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0);
             for(int sec=4;sec>=1;sec--){final int n=sec;Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);}},(5-sec)*20L);}
