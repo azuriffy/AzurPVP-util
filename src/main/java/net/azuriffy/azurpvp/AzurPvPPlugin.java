@@ -558,7 +558,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     tell(s, "&cYou cannot delete the primary world. Nether and End can be deleted if they are not the primary world."); return true;
                 }
                 World fallback = Bukkit.getWorld(getConfig().getString("spawn.world", ""));
-                if (fallback == null || fallback.equals(target)) fallback = Bukkit.getWorlds().stream().filter(w -> !w.equals(target)).findFirst().orElse(null);
+                final World worldBeingDeleted = target;
+                if (fallback == null || fallback.equals(worldBeingDeleted)) {
+                    fallback = Bukkit.getWorlds().stream()
+                            .filter(w -> !w.equals(worldBeingDeleted))
+                            .findFirst()
+                            .orElse(null);
+                }
                 if (fallback == null) { tell(s, "&cNo safe destination world is loaded; cannot delete this world."); return true; }
                 for (Player online : new ArrayList<>(target.getPlayers())) online.teleport(fallback.getSpawnLocation());
                 File folder = target.getWorldFolder();
