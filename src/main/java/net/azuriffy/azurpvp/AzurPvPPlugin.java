@@ -1025,7 +1025,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         e.getDrops().removeIf(this::isDuelItem);
         Player loser=e.getEntity(); UUID other=activeDuels.get(loser.getUniqueId()); if(other!=null){
             e.setKeepInventory(true); e.getDrops().clear(); e.setDroppedExp(0);
-            e.setShowDeathScreen(false);
+            // Avoid Paper-only PlayerDeathEvent#setShowDeathScreen so this compiles against the configured API.
             Player winner=Bukkit.getPlayer(other);
             pendingDuelLosers.add(loser.getUniqueId());
             Bukkit.getScheduler().runTask(this,()->finishDuel(winner,loser));
