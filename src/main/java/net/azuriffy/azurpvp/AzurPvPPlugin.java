@@ -54,6 +54,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Map<UUID, String> duelMaps = new ConcurrentHashMap<>();
     private final Map<UUID, String> duelGuiMode = new ConcurrentHashMap<>();
     private final Map<UUID, UUID> activeDuels = new ConcurrentHashMap<>();
+    private final Map<UUID, String> queuedPlayers = new ConcurrentHashMap<>();
     private final Set<UUID> duelCountdown = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingDuelLosers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> duelArenaByPlayer = new ConcurrentHashMap<>();
@@ -399,6 +400,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         BossBar b=combatBars.remove(p.getUniqueId()); if(b!=null)b.removeAll();
         combatUntil.remove(p.getUniqueId());
+        queuedPlayers.remove(p.getUniqueId());
     }
     @EventHandler public void onMove(PlayerMoveEvent e) {
         if (frozen.contains(e.getPlayer().getUniqueId()) && e.getTo()!=null &&
@@ -758,13 +760,48 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private List<String> arenaKeys() { ConfigurationSection sec=getConfig().getConfigurationSection("arenas"); if(sec==null)return Collections.emptyList(); return new ArrayList<>(sec.getKeys(false)); }
     private Location arenaCenter(String id) { String path="arenas."+id; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z")); }
     private Location arenaSpawn(String id,int n) { String path="arenas."+id+".spawn"+n; if(!getConfig().contains(path+".world"))return null; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z"),(float)getConfig().getDouble(path+".yaw"),(float)getConfig().getDouble(path+".pitch")); }
+    private String findAvailableArena() {
+        Set<Integer> busy = new HashSet<>(duelArenaByPlayer.values());
+        for (String id : arenaKeys()) {
+            try {
+                int number = Integer.parseInt(id);
+                if (busy.contains(number)) continue;
+                if (arenaSpawn(id, 1) != null && arenaSpawn(id, 2) != null) return id;
+            } catch (NumberFormatException ignored) { }
+        }
+        return null;
+    }
+    private void joinQueue(Player player, String kit) {
+        if (activeDuels.containsKey(player.getUniqueId())) { tell(player, "&cYou are already in a duel."); return; }
+        if (queuedPlayers.containsKey(player.getUniqueId())) { tell(player, "&eYou are already queued. Use the Duel item again after your match or wait for an opponent."); return; }
+        queuedPlayers.put(player.getUniqueId(), kit);
+        String arena = findAvailableArena();
+        if (arena == null) {
+            tell(player, "&dQueued with kit &f" + kit + "&d. &cNo free arena with both spawns is available yet; you'll stay queued.");
+            return;
+        }
+        Player opponent = Bukkit.getOnlinePlayers().stream()
+            .filter(other -> !other.getUniqueId().equals(player.getUniqueId()))
+            .filter(other -> queuedPlayers.containsKey(other.getUniqueId()))
+            .filter(other -> !activeDuels.containsKey(other.getUniqueId()))
+            .findFirst().orElse(null);
+        if (opponent == null) {
+            tell(player, "&dQueued with kit &f" + kit + "&d. &7Waiting for an opponent...");
+            return;
+        }
+        queuedPlayers.remove(player.getUniqueId());
+        queuedPlayers.remove(opponent.getUniqueId());
+        tell(player, "&aOpponent found: &f" + opponent.getName() + "&a. Starting duel!");
+        tell(opponent, "&aOpponent found: &f" + player.getName() + "&a. Starting duel!");
+        startDuel(player, opponent);
+    }
     private void startDuel(Player first,Player second) {
-        String arena=null; for(String id:arenaKeys()) if(arenaSpawn(id,1)!=null&&arenaSpawn(id,2)!=null) { arena=id; break; }
-        if(arena==null) { tell(first,"&cNo usable arena: every arena needs spawn 1 and spawn 2. Configure another arena first.");tell(second,"&cDuel cancelled: no arena has both spawns configured.");return; }
+        String arena=findAvailableArena();
+        if(arena==null) { tell(first,"&cNo free arena with both spawns configured. Players remain queued when using matchmaking.");tell(second,"&cDuel cancelled: no free arena has both spawns configured.");return; }
         if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return; }
         activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),Integer.parseInt(arena));duelArenaByPlayer.put(second.getUniqueId(),Integer.parseInt(arena)); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
         first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
-        giveDuelKit(first,duelChosenKits.getOrDefault(first.getUniqueId(),"sword"));giveDuelKit(second,duelChosenKits.getOrDefault(first.getUniqueId(),"sword"));first.teleport(arenaSpawn(arena,1));second.teleport(arenaSpawn(arena,2));
+        giveDuelKit(first,queuedPlayers.getOrDefault(first.getUniqueId(),duelChosenKits.getOrDefault(first.getUniqueId(),"sword")));giveDuelKit(second,queuedPlayers.getOrDefault(second.getUniqueId(),duelChosenKits.getOrDefault(second.getUniqueId(),"sword")));first.teleport(arenaSpawn(arena,1));second.teleport(arenaSpawn(arena,2));
         tell(first,"&dDuel starting in 5 seconds!");tell(second,"&dDuel starting in 5 seconds!");
         for(int sec=4;sec>=1;sec--){final int n=sec;Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);}},(5-sec)*20L);}
         Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){duelCountdown.remove(first.getUniqueId());duelCountdown.remove(second.getUniqueId());first.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);second.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);}},100L);
@@ -928,7 +965,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             String mode=duelGuiMode.getOrDefault(p.getUniqueId(),"queue");
             if(mode.equals("duel")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.put(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
             else if(mode.equals("challenge")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.put(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
-            else { p.closeInventory(); tell(p,"&dQueued with kit &f"+kit+"&d. &7Matchmaking requires an arena/queue system to be configured."); }
+            else { p.closeInventory(); duelChosenKits.put(p.getUniqueId(), kit); joinQueue(p, kit); }
         } else {
             if(e.getSlot()==10) { duelRounds.put(p.getUniqueId(),1); openDuelSettings(p); }
             else if(e.getSlot()==13) { List<String> maps=getConfig().getStringList("duel.maps"); if(maps.isEmpty())maps=List.of("random"); String current=duelMaps.getOrDefault(p.getUniqueId(),"random"); int i=maps.indexOf(current); duelMaps.put(p.getUniqueId(),maps.get((i+1)%maps.size())); openDuelSettings(p); }
