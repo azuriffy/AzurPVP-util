@@ -35,7 +35,6 @@ import org.bukkit.event.player.*;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.potion.PotionType;
 import org.bukkit.event.inventory.InventoryClickEvent;
@@ -53,9 +52,6 @@ import java.io.File;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import ac.grim.grimac.api.GrimAPIProvider;
-import ac.grim.grimac.api.event.events.FlagEvent;
-import ac.grim.grimac.api.plugin.GrimPlugin;
 
 public final class AzurPvPPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
     private Connection db;
@@ -88,9 +84,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Map<UUID, Long> itemCooldowns = new ConcurrentHashMap<>();
     private final Map<UUID, Long> pearlCooldowns = new ConcurrentHashMap<>();
     private final Map<UUID, Long> gappleCooldowns = new ConcurrentHashMap<>();
-    private final Map<UUID, List<String>> suspectedFlags = new ConcurrentHashMap<>();
-    private static final String SUS_TITLE = "§5Suspected Players";
-    private GrimPlugin grimPlugin;
 
     @Override public void onEnable() {
         saveDefaultConfig();
@@ -107,37 +100,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "set", "cmode", "sus")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "set", "cmode")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
         getServer().getPluginManager().registerEvents(this, this);
-        if (Bukkit.getPluginManager().getPlugin("GrimAC") != null) {
-            try {
-                var grimApi = GrimAPIProvider.get();
-                grimPlugin = grimApi.getGrimPlugin(this);
-                grimApi.getEventBus().get(FlagEvent.class).onFlag(grimPlugin, (user, check, verbose, cancelled) -> {
-                    String flaggedName = user.getName();
-                    String checkName = check.getCheckName();
-                    String details = String.valueOf(verbose);
-                    Bukkit.getScheduler().runTask(this, () -> {
-                        OfflinePlayer flagged = Bukkit.getOfflinePlayer(flaggedName);
-                        UUID id = flagged.getUniqueId();
-                        List<String> previous = new ArrayList<>(suspectedFlags.getOrDefault(id, List.of()));
-                        String entry = "§c" + checkName + " §7- " + ChatColor.stripColor(details);
-                        previous.add(0, entry);
-                        if (previous.size() > 12) previous = new ArrayList<>(previous.subList(0, 12));
-                        suspectedFlags.put(id, List.copyOf(previous));
-                    });
-                    return cancelled;
-                });
-                getLogger().info("GrimAC flag tracking enabled for /sus.");
-            } catch (Throwable ex) {
-                getLogger().warning("Could not hook GrimAC API; /sus flag tracking is unavailable: " + ex.getMessage());
-            }
-        } else {
-            getLogger().warning("GrimAC not found; install GrimAC to populate /sus.");
-        }
         combatTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
             updateCombat(); updateQueueActionBars();
             for (Player online : Bukkit.getOnlinePlayers()) {
@@ -323,7 +290,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
         Player p = e.getPlayer();
-        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","sus","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
+        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
         if (isDev(p)) return;
         e.getCommands().removeIf(command -> {
             String root = command.toLowerCase(Locale.ROOT).split(":")[0];
@@ -336,7 +303,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
             case "setspawn","maintenance","backup","role","arena","addarena","set","world","tp","cmode" -> "owner";
-            case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","sus","repair","gamemode","sus","speed","heal","feed" -> "moderation";
+            case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
             default -> "member";
         };
@@ -715,12 +682,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public boolean onCommand(CommandSender s, Command cmd, String label, String[] a) {
         String n=cmd.getName().toLowerCase(Locale.ROOT);
-        if (n.equals("sus")) {
-            if (!isAdminOrAbove(s)) { tell(s, "&cAdmin or Owner required."); return true; }
-            if (!(s instanceof Player viewer)) { tell(s, "&cPlayers only."); return true; }
-            openSusMenu(viewer, 0);
-            return true;
-        }
         if (n.equals("cmode")) {
             if (!isDev(s)) { tell(s, "&cOnly the Owner can use /cmode."); return true; }
             if (!(s instanceof Player player)) { tell(s, "&cRun this command in-game while standing in the target world."); return true; }
@@ -1258,82 +1219,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(selectedMeta!=null){ selectedMeta.setDisplayName(c("&dSelected Kit: &f"+prettyKitName(kit))); selectedMeta.setLore(List.of(c("&7Close this menu to cancel"))); selectedIcon.setItemMeta(selectedMeta); }
         inv.setItem(22, selectedIcon);
         p.openInventory(inv);
-    }
-
-    private void openSusMenu(Player viewer, int page) {
-        List<UUID> ids = new ArrayList<>(suspectedFlags.keySet());
-        ids.sort((a, b) -> Integer.compare(suspectedFlags.getOrDefault(b, List.of()).size(), suspectedFlags.getOrDefault(a, List.of()).size()));
-        Inventory inv = Bukkit.createInventory(null, 54, SUS_TITLE + " §8(" + (page + 1) + ")");
-        int start = page * 45;
-        for (int slot = 0; slot < 45 && start + slot < ids.size(); slot++) {
-            UUID id = ids.get(start + slot);
-            OfflinePlayer off = Bukkit.getOfflinePlayer(id);
-            Player online = Bukkit.getPlayer(id);
-            ItemStack head = new ItemStack(Material.PLAYER_HEAD);
-            SkullMeta meta = (SkullMeta) head.getItemMeta();
-            if (meta != null) {
-                meta.setOwningPlayer(off);
-                String name = off.getName() == null ? id.toString().substring(0, 8) : off.getName();
-                meta.setDisplayName(c((online != null ? "&a" : "&c") + name + (online != null ? " &a● ONLINE" : " &c● OFFLINE")));
-                List<String> lore = new ArrayList<>();
-                lore.add(c("&7Recent GrimAC flags:"));
-                for (String flag : suspectedFlags.getOrDefault(id, List.of())) lore.add(flag.length() > 75 ? flag.substring(0, 75) : flag);
-                lore.add(c("&eClick to teleport if online"));
-                lore.add("§0UUID:" + id);
-                meta.setLore(lore);
-                head.setItemMeta(meta);
-            }
-            inv.setItem(slot, head);
-        }
-        if (page > 0) inv.setItem(45, susButton(Material.ARROW, "&ePrevious page", List.of("&7Click to go back")));
-        inv.setItem(49, susButton(Material.BOOK, "&dGrimAC flags", List.of("&7Flags are indicators, not proof of cheating.", "&7Review evidence before punishing.")));
-        if (start + 45 < ids.size()) inv.setItem(53, susButton(Material.ARROW, "&eNext page", List.of("&7Click to view more")));
-        viewer.openInventory(inv);
-    }
-
-    @EventHandler public void onSusMenuClick(InventoryClickEvent e) {
-        if (!(e.getWhoClicked() instanceof Player viewer)) return;
-        String title = e.getView().getTitle();
-        if (title == null || !ChatColor.stripColor(title).startsWith("Suspected Players")) return;
-        e.setCancelled(true);
-        if (e.getClickedInventory() != e.getView().getTopInventory()) return;
-        if (e.getSlot() == 45 && e.getCurrentItem() != null && e.getCurrentItem().getType() == Material.ARROW) {
-            int page = Math.max(0, parseSusPage(title) - 2); openSusMenu(viewer, page); return;
-        }
-        if (e.getSlot() == 53 && e.getCurrentItem() != null && e.getCurrentItem().getType() == Material.ARROW) {
-            openSusMenu(viewer, parseSusPage(title)); return;
-        }
-        ItemStack clicked = e.getCurrentItem();
-        if (clicked == null || clicked.getType() != Material.PLAYER_HEAD || !clicked.hasItemMeta() || !clicked.getItemMeta().hasLore()) return;
-        for (String line : clicked.getItemMeta().getLore()) {
-            if (line.startsWith("§0UUID:")) {
-                try {
-                    UUID id = UUID.fromString(line.substring("§0UUID:".length()));
-                    Player target = Bukkit.getPlayer(id);
-                    if (target == null) { tell(viewer, "&cThat player is offline."); return; }
-                    viewer.teleport(target.getLocation());
-                    tell(viewer, "&dTeleported to suspected player &f" + target.getName() + "&d.");
-                } catch (IllegalArgumentException ignored) {}
-                return;
-            }
-        }
-    }
-    private ItemStack susButton(Material material, String name, List<String> lore) {
-        ItemStack item = new ItemStack(material);
-        ItemMeta meta = item.getItemMeta();
-        if (meta != null) {
-            meta.setDisplayName(c(name));
-            List<String> colored = new ArrayList<>();
-            for (String line : lore) colored.add(c(line));
-            meta.setLore(colored);
-            item.setItemMeta(meta);
-        }
-        return item;
-    }
-
-    private int parseSusPage(String title) {
-        try { String stripped = ChatColor.stripColor(title); int open = stripped.lastIndexOf('('); int close = stripped.lastIndexOf(')'); return Integer.parseInt(stripped.substring(open + 1, close)); }
-        catch (Exception ex) { return 1; }
     }
 
     @EventHandler public void onDuelInventoryClick(InventoryClickEvent e) {
