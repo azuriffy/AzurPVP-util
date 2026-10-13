@@ -34,7 +34,6 @@ import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.block.Action;
 import org.bukkit.Material;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.boss.*;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
 import org.bukkit.event.player.PlayerCommandSendEvent;
@@ -55,7 +54,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Map<UUID, String> duelMaps = new ConcurrentHashMap<>();
     private final Map<UUID, String> duelGuiMode = new ConcurrentHashMap<>();
     private final Map<UUID, UUID> activeDuels = new ConcurrentHashMap<>();
-    private final LinkedHashMap<UUID, String> duelQueue = new LinkedHashMap<>();
+    private final LinkedHashMap<UUID, LinkedHashMap<String, Long>> duelQueue = new LinkedHashMap<>();
     private final Set<UUID> duelCountdown = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingDuelLosers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> duelArenaByPlayer = new ConcurrentHashMap<>();
@@ -67,7 +66,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Set<UUID> god = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Location> lastLocations = new ConcurrentHashMap<>();
     private final Map<UUID, Long> kitCooldowns = new ConcurrentHashMap<>();
-    private final Map<UUID, BossBar> combatBars = new ConcurrentHashMap<>();
     private BukkitTask combatTask;
     private YamlConfiguration roles;
     private File rolesFile;
@@ -95,7 +93,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
         getServer().getPluginManager().registerEvents(this, this);
-        combatTask = Bukkit.getScheduler().runTaskTimer(this, this::updateCombat, 1L, 10L);
+        combatTask = Bukkit.getScheduler().runTaskTimer(this, () -> { updateCombat(); updateQueueActionBars(); }, 1L, 10L);
         // Periodic world saves reduce data loss on clean restarts; host-level resets still need host configuration fixed.
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             for (World world : Bukkit.getWorlds()) {
@@ -127,7 +125,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }
         saveRoles();
-        combatBars.values().forEach(BossBar::removeAll);
         if (db != null) try { db.close(); } catch (SQLException ignored) {}
     }
 
@@ -376,25 +373,41 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private void tag(Player p) {
         if (!getConfig().getBoolean("combat.enabled", true)) return;
         combatUntil.put(p.getUniqueId(), System.currentTimeMillis() + getConfig().getLong("combat.tag-seconds",15)*1000L);
-        if (getConfig().getBoolean("combat.bossbar", true)) {
-            BossBar bar = combatBars.computeIfAbsent(p.getUniqueId(), id -> Bukkit.createBossBar(c("&5&lCOMBAT &8» &dDo not log out"), BarColor.PURPLE, BarStyle.SOLID));
-            if (!bar.getPlayers().contains(p)) bar.addPlayer(p);
-            bar.setVisible(true); bar.setProgress(1.0);
-        }
-        p.sendActionBar(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(c("&5&lCOMBAT &8» &d" + getConfig().getLong("combat.tag-seconds",15) + "s")));
+
     }
     private boolean tagged(Player p) { return combatUntil.getOrDefault(p.getUniqueId(),0L) > System.currentTimeMillis(); }
     private void updateCombat() {
         long now = System.currentTimeMillis();
         for (UUID id : new ArrayList<>(combatUntil.keySet())) {
-            Player p = Bukkit.getPlayer(id); long until = combatUntil.getOrDefault(id,0L);
-            if (until <= now || p == null || !p.isOnline()) {
-                combatUntil.remove(id); BossBar b = combatBars.remove(id); if (b != null) b.removeAll();
-            } else if (p != null) {
-                double remain = Math.max(0, Math.min(1, (until-now)/(double)(getConfig().getLong("combat.tag-seconds",15)*1000L)));
-                BossBar b = combatBars.get(id); if (b != null) b.setProgress(remain);
-                p.sendActionBar(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(c("&5&lCOMBAT &8» &d" + ((until-now+999)/1000) + "s")));
+            if (combatUntil.getOrDefault(id, 0L) <= now || Bukkit.getPlayer(id) == null) combatUntil.remove(id);
+        }
+    }
+
+    private void updateQueueActionBars() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<UUID, LinkedHashMap<String, Long>> entry : new ArrayList<>(duelQueue.entrySet())) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null || !player.isOnline() || activeDuels.containsKey(entry.getKey())) {
+                duelQueue.remove(entry.getKey());
+                continue;
             }
+            LinkedHashMap<String, Long> queued = entry.getValue();
+            if (queued.isEmpty()) { duelQueue.remove(entry.getKey()); continue; }
+            long oldest = queued.values().stream().mapToLong(Long::longValue).min().orElse(now);
+            long totalSeconds = Math.max(0, (now - oldest) / 1000L);
+            String totalTime = String.format(Locale.ROOT, "%02d:%02d", totalSeconds / 60, totalSeconds % 60);
+            List<Map.Entry<String, Long>> kits = new ArrayList<>(queued.entrySet());
+            int phase = (int)((now / 2500L) % (kits.size() + 1));
+            String message;
+            if (phase == kits.size()) {
+                message = "&d&lQueued &f" + kits.size() + " &dkit" + (kits.size() == 1 ? "" : "s") + " &8(&f" + totalTime + "&8)";
+            } else {
+                Map.Entry<String, Long> kit = kits.get(phase);
+                long seconds = Math.max(0, (now - kit.getValue()) / 1000L);
+                String kitTime = String.format(Locale.ROOT, "%02d:%02d", seconds / 60, seconds % 60);
+                message = "&d&lQueued &f" + prettyKitName(kit.getKey()) + " &8(&f" + kitTime + "&8)";
+            }
+            player.sendActionBar(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(c(message)));
         }
     }
 
@@ -419,7 +432,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if ("KILL".equalsIgnoreCase(getConfig().getString("combat.punishment","KILL"))) p.setHealth(0.0);
             else for (ItemStack item : p.getInventory().getContents()) if (item != null) p.getWorld().dropItemNaturally(p.getLocation(),item);
         }
-        BossBar b=combatBars.remove(p.getUniqueId()); if(b!=null)b.removeAll();
         combatUntil.remove(p.getUniqueId());
     }
     @EventHandler public void onMove(PlayerMoveEvent e) {
@@ -778,24 +790,46 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ItemStack item=new ItemStack(material); ItemMeta meta=item.getItemMeta(); if(meta!=null){meta.setDisplayName(c(name)); if(lore!=null)meta.setLore(lore.stream().map(this::c).toList()); item.setItemMeta(meta);} return item;
     }
     private void queueForDuel(Player player, String kit) {
-        if (activeDuels.containsKey(player.getUniqueId())) { tell(player, "&cYou are already in a duel."); return; }
-        duelQueue.put(player.getUniqueId(), kit);
-        tell(player, "&dQueued with kit &f" + kit + "&d. Waiting for an opponent...");
+        UUID playerId = player.getUniqueId();
+        if (activeDuels.containsKey(playerId)) { tell(player, "&cYou are already in a duel."); return; }
+        String normalizedKit = normalizeKitName(kit);
+        LinkedHashMap<String, Long> playerKits = duelQueue.computeIfAbsent(playerId, ignored -> new LinkedHashMap<>());
+        if (playerKits.containsKey(normalizedKit)) {
+            playerKits.remove(normalizedKit);
+            if (playerKits.isEmpty()) duelQueue.remove(playerId);
+            player.playSound(player.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 1.0f, 0.8f);
+            tell(player, "&eRemoved &f" + prettyKitName(normalizedKit) + " &efrom your queue.");
+            return;
+        }
+        playerKits.put(normalizedKit, System.currentTimeMillis());
+        tell(player, "&dQueued for &f" + prettyKitName(normalizedKit) + "&d. Click the same kit again to leave that queue.");
+
         Player opponent = null;
-        for (UUID id : new ArrayList<>(duelQueue.keySet())) {
-            if (!id.equals(player.getUniqueId())) {
-                Player candidate = Bukkit.getPlayer(id);
-                if (candidate != null && candidate.isOnline() && !activeDuels.containsKey(id)) { opponent = candidate; break; }
-                duelQueue.remove(id);
+        String matchedKit = null;
+        for (Map.Entry<UUID, LinkedHashMap<String, Long>> entry : new ArrayList<>(duelQueue.entrySet())) {
+            UUID candidateId = entry.getKey();
+            if (candidateId.equals(playerId) || activeDuels.containsKey(candidateId)) continue;
+            Player candidate = Bukkit.getPlayer(candidateId);
+            if (candidate == null || !candidate.isOnline()) { duelQueue.remove(candidateId); continue; }
+            if (entry.getValue().containsKey(normalizedKit)) {
+                opponent = candidate;
+                matchedKit = normalizedKit;
+                break;
             }
         }
         if (opponent != null) {
-            String opponentKit = duelQueue.remove(opponent.getUniqueId());
-            duelQueue.remove(player.getUniqueId());
-            duelChosenKits.put(player.getUniqueId(), kit);
-            duelChosenKits.put(opponent.getUniqueId(), opponentKit == null ? "sword" : opponentKit);
+            UUID opponentId = opponent.getUniqueId();
+            // Match on this kit only, then cancel every other queue either player had joined.
+            duelQueue.remove(playerId);
+            duelQueue.remove(opponentId);
+            player.sendActionBar(net.kyori.adventure.text.Component.empty());
+            opponent.sendActionBar(net.kyori.adventure.text.Component.empty());
+            duelChosenKits.put(playerId, matchedKit);
+            duelChosenKits.put(opponentId, matchedKit);
             player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.2f);
             opponent.playSound(opponent.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.2f);
+            tell(player, "&aMatched with &f" + opponent.getName() + " &afor &f" + prettyKitName(matchedKit) + "&a. Other queues cancelled.");
+            tell(opponent, "&aMatched with &f" + player.getName() + " &afor &f" + prettyKitName(matchedKit) + "&a. Other queues cancelled.");
             startDuel(player, opponent);
         }
     }
@@ -881,7 +915,17 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(index>=slots.length) break;
             ItemStack icon=kitIconItem(key);
             ItemMeta iconMeta=icon.getItemMeta();
-            if(iconMeta!=null){ iconMeta.setDisplayName(c("&d&l"+prettyKitName(key))); iconMeta.setLore(List.of(c(mode.equals("editor")?"&7Click to edit your personal version":"&7Click to select this kit"))); icon.setItemMeta(iconMeta); }
+            if(iconMeta!=null){
+                iconMeta.setDisplayName(c("&d&l"+prettyKitName(key)));
+                boolean queued = duelQueue.getOrDefault(p.getUniqueId(), new LinkedHashMap<>()).containsKey(normalizeKitName(key));
+                List<String> lore = new ArrayList<>();
+                if (mode.equals("editor")) lore.add(c("&7Click to edit your personal version"));
+                else {
+                    lore.add(c(queued ? "&a✔ QUEUED" : "&7Click to queue for this kit"));
+                    lore.add(c(queued ? "&eClick again to leave this queue" : "&7You can queue for multiple kits"));
+                }
+                iconMeta.setLore(lore); icon.setItemMeta(iconMeta);
+            }
             inv.setItem(slots[index++],icon);
         }
         if(index==0) inv.setItem(22,namedItem(Material.BARRIER,"&cNo kits created",List.of("&7Owner: use /kit create <name>")));
@@ -1018,7 +1062,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             String mode=duelGuiMode.getOrDefault(p.getUniqueId(),"queue");
             if(mode.equals("duel")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.put(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
             else if(mode.equals("challenge")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.put(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
-            else { p.closeInventory(); queueForDuel(p, kit); }
+            else { queueForDuel(p, kit); if (!activeDuels.containsKey(p.getUniqueId())) openKitMenu(p, "queue", null); }
         } else {
             if(e.getSlot()==10) { duelRounds.put(p.getUniqueId(),1); openDuelSettings(p); }
             else if(e.getSlot()==13) { List<String> maps=getConfig().getStringList("duel.maps"); if(maps.isEmpty())maps=List.of("random"); String current=duelMaps.getOrDefault(p.getUniqueId(),"random"); int i=maps.indexOf(current); duelMaps.put(p.getUniqueId(),maps.get((i+1)%maps.size())); openDuelSettings(p); }
