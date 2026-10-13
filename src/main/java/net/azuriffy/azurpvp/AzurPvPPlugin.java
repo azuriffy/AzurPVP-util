@@ -98,7 +98,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tphere", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "set")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "set")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -288,7 +288,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
         Player p = e.getPlayer();
-        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","tphere","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
+        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
         if (isDev(p)) return;
         e.getCommands().removeIf(command -> {
             String root = command.toLowerCase(Locale.ROOT).split(":")[0];
@@ -303,7 +303,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             case "setspawn","maintenance","backup","role","arena","addarena","set","world","tp" -> "owner";
             case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
-            case "tphere" -> "teleport";
             default -> "member";
         };
     }
@@ -864,7 +863,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             return true;
         }
         if(n.equals("back")) { if(!(s instanceof Player p))return true; Location l=lastLocations.get(p.getUniqueId()); if(l==null){tell(p,"&cNo previous location saved.");return true;} if(tagged(p)){tell(p,"&cYou cannot use /back during combat.");return true;} p.teleport(l);tell(p,"&dReturned to your previous location.");return true; }
-        if(n.equals("tphere")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(!(s instanceof Player p)||a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}t.teleport(p);tell(s,"&dTeleported "+t.getName()+" to you.");return true; }
+        if(n.equals("tpa")) {
+            if (!isAdminOrAbove(s)) { tell(s, "&cAdmin or Owner required."); return true; }
+            if (!(s instanceof Player p)) { tell(s, "&cOnly an in-game player can use /tpa."); return true; }
+            if (a.length != 1) { tell(p, "&cUsage: /tpa <player>"); return true; }
+            Player target = Bukkit.getPlayerExact(a[0]);
+            if (target == null) { tell(p, "&cThat player is not online."); return true; }
+            if (target.equals(p)) { tell(p, "&cYou cannot teleport to yourself."); return true; }
+            p.teleport(target.getLocation());
+            tell(p, "&dTeleported to &f" + target.getName() + "&d.");
+            tell(target, "&dAdmin &f" + p.getName() + " &dteleported to you.");
+            return true;
+        }
         if(n.equals("gamemode")) {
             if(!isDev(s)){tell(s,"&cOnly Owner can use /gamemode. Mods and above may use /gms and /gmsp.");return true;}
             if(a.length < 1 || a.length > 2){tell(s,"&cUsage: /gamemode <mode> [player]");return true;}
