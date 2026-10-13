@@ -654,7 +654,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 if (!target.equals(p)) tell(target, "&dYour gamemode was set to &f" + mode.name().toLowerCase(Locale.ROOT) + "&d by &f" + p.getName() + "&d.");
                 return;
             }
-            tell(p, "&dGamemode updated."); return;
         }
         if (Set.of("ban", "tempban", "timeout", "unban").contains(root) && !isAdminOrAbove(p)) { e.setCancelled(true); tell(p, "&cAdmin or Owner required."); return; }
         if (tagged(p) && getConfig().getBoolean("combat.prevent-commands", true) &&
