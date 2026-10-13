@@ -201,6 +201,14 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String role = roleOf(p.getUniqueId());
         return Set.of("admin", "mod", "helper").contains(role);
     }
+    private boolean isAdminOrAbove(CommandSender s) {
+        if (s instanceof ConsoleCommandSender) return true;
+        return s instanceof Player p && Set.of("owner", "admin").contains(roleOf(p.getUniqueId()));
+    }
+    private boolean isModOrAbove(CommandSender s) {
+        if (s instanceof ConsoleCommandSender) return true;
+        return s instanceof Player p && Set.of("owner", "admin", "mod").contains(roleOf(p.getUniqueId()));
+    }
     private boolean can(CommandSender s, String category) {
         if (!(s instanceof Player p)) return true;
         String role = roleOf(p.getUniqueId());
@@ -282,7 +290,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Player p = e.getPlayer();
         Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","tphere","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
         if (isDev(p)) return;
-        e.getCommands().removeIf(command -> restricted.contains(command.toLowerCase(Locale.ROOT).split(":")[0]) && !can(p, commandCategory(command)));
+        e.getCommands().removeIf(command -> {
+            String root = command.toLowerCase(Locale.ROOT).split(":")[0];
+            if (Set.of("ban", "tempban", "timeout", "unban").contains(root)) return !isAdminOrAbove(p);
+            if (Set.of("gms", "gmsp").contains(root)) return !isModOrAbove(p);
+            if (root.equals("gmc")) return true;
+            return restricted.contains(root) && !can(p, commandCategory(command));
+        });
     }
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
@@ -603,12 +617,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String root = pieces[0].toLowerCase(Locale.ROOT).replaceFirst("^minecraft:", "");
         String args = pieces.length > 1 ? pieces[1] : "";
         if (root.equals("r")) { e.setCancelled(true); if (args.isBlank()) tell(p, "&cUsage: /r <message>"); else replyToLast(p, args); return; }
-        if (root.equals("gmsp")) { e.setCancelled(true); if (!can(p, "moderation")) { tell(p, "&cAdmin or Owner required."); return; } p.setGameMode(GameMode.SPECTATOR); tell(p, "&dSpectator mode enabled silently."); return; }
+        if (root.equals("gmsp")) { e.setCancelled(true); if (!isModOrAbove(p)) { tell(p, "&cMod or above required."); return; } p.setGameMode(GameMode.SPECTATOR); tell(p, "&dSpectator mode enabled silently."); return; }
         if (root.equals("gmc") || root.equals("gms") || root.equals("gamemode")) {
             e.setCancelled(true);
-            if (!isDev(p)) { tell(p, "&cOnly the Owner can change gamemodes. Use /gmsp if you are Admin or above."); return; }
-            if (root.equals("gmc")) p.setGameMode(GameMode.CREATIVE);
-            else if (root.equals("gms")) p.setGameMode(GameMode.SURVIVAL);
+            if (root.equals("gmc")) {
+                if (!isDev(p)) { tell(p, "&cOnly the Owner can use /gmc."); return; }
+                p.setGameMode(GameMode.CREATIVE); tell(p, "&dGamemode updated."); return;
+            }
+            if (root.equals("gms")) {
+                if (!isModOrAbove(p)) { tell(p, "&cMod or above required."); return; }
+                p.setGameMode(GameMode.SURVIVAL); tell(p, "&dGamemode updated."); return;
+            }
+            if (!isDev(p)) { tell(p, "&cOnly the Owner can use /gamemode. Mods and above may use /gms and /gmsp."); return; }
             else {
                 String[] gmArgs = args.isBlank() ? new String[0] : args.trim().split("\\s+");
                 if (gmArgs.length < 1 || gmArgs.length > 2) {
@@ -637,7 +657,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
             tell(p, "&dGamemode updated."); return;
         }
-        if ((root.equals("ban") || root.equals("tempban") || root.equals("timeout") || root.equals("unban")) && !can(p, "moderation")) { e.setCancelled(true); tell(p, "&cAdmin or Owner required."); return; }
+        if (Set.of("ban", "tempban", "timeout", "unban").contains(root) && !isAdminOrAbove(p)) { e.setCancelled(true); tell(p, "&cAdmin or Owner required."); return; }
         if (tagged(p) && getConfig().getBoolean("combat.prevent-commands", true) &&
             getConfig().getStringList("combat.blocked-commands").stream().map(v -> v.toLowerCase(Locale.ROOT)).anyMatch(root::equals)) {
             e.setCancelled(true); tell(p, "&cYou cannot use that command while combat-tagged.");
@@ -666,7 +686,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("role")) { roleCommand(s,a); return true; }
         if(n.equals("help")) {
             tell(s, "&d&lAzurPvP Commands &8— &7private help");
-            tell(s, "&7Players: &f/spawn, /stats, /kit, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report");
+            tell(s, "&7Players: &f/spawn, /stats, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report");
             if (can(s,"staff")) tell(s, "&aStaff: &f/fly, /vanish, /freeze, /staffchat, /whois, /announce");
             if (can(s,"moderation")) tell(s, "&cModeration: &f/ban, /tempban, /unban, /kick, /mute, /unmute, /warn, /history, /heal, /feed, /gamemode, /speed, /clear, /repair");
             if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup, /arena");
@@ -784,13 +804,16 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("kit")) {
             if(!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
             if(a.length == 1 && a[0].equalsIgnoreCase("clear")) {
+                if(!isDev(p)) { tell(p, "&cOnly the owner can use /kit clear."); return true; }
                 boolean hasItems = false;
                 for (ItemStack item : p.getInventory().getContents()) if (item != null && item.getType() != Material.AIR) { hasItems = true; break; }
-                if (hasItems || p.getInventory().getHelmet() != null || p.getInventory().getChestplate() != null || p.getInventory().getLeggings() != null || p.getInventory().getBoots() != null || p.getInventory().getItemInOffHand().getType() != Material.AIR) {
+                for (ItemStack item : p.getInventory().getArmorContents()) if (item != null && item.getType() != Material.AIR) hasItems = true;
+                if (p.getInventory().getItemInOffHand().getType() != Material.AIR) hasItems = true;
+                if (hasItems) {
                     p.getInventory().clear();
                     p.getInventory().setArmorContents(null);
                     p.getInventory().setItemInOffHand(null);
-                    tell(p, "&aInventory cleared. Run &f/kit clear &aone more time to restore the Duel sword and Kit editor.");
+                    tell(p, "&aInventory, armor and offhand cleared. Run &f/kit clear &aagain to restore the Duel sword and Kit editor.");
                 } else {
                     giveDuelItem(p);
                     giveKitEditor(p);
@@ -798,23 +821,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 }
                 return true;
             }
-            if(a.length >= 2 && a[0].equalsIgnoreCase("create")) {
-                if(!isDev(p)) { tell(p,"&cOnly the owner can create global kits."); return true; }
-                String kitName=normalizeKitName(String.join("_",Arrays.copyOfRange(a,1,a.length)));
-                if(kitName.isBlank()) { tell(p,"&cUse /kit create <name>"); return true; }
-                if(getConfig().contains("kits."+kitName)) { tell(p,"&cThat kit already exists. Use /kit upload "+kitName+" to replace its contents."); return true; }
-                getConfig().set("kits."+kitName+".contents", new ItemStack[41]);
-                getConfig().set("kits."+kitName+".cooldown-seconds", 0); saveConfig();
-                tell(p,"&aCreated kit &f"+kitName+"&a. Hold the inventory you want and use &f/kit upload "+kitName+"&a."); return true;
-            }
-            if(a.length >= 2 && a[0].equalsIgnoreCase("delete")) {
-                if(!isDev(p)) { tell(p,"&cOnly the owner can delete global kits."); return true; }
-                String kitName=normalizeKitName(a[1]);
-                if(!getConfig().contains("kits."+kitName)) { tell(p,"&cThat kit does not exist."); return true; }
-                getConfig().set("kits."+kitName,null); saveConfig(); tell(p,"&aDeleted kit &f"+kitName+"&a."); return true;
-            }
             if(a.length >= 2 && a[0].equalsIgnoreCase("upload")) {
-                if(!isDev(p)) { tell(p,"&cOnly the owner can upload global kits."); return true; }
+                if(!isDev(p)) { tell(p,"&cOnly the owner can upload kits."); return true; }
                 String kitName=normalizeKitName(a[1]);
                 if(kitName.isBlank()) { tell(p,"&cUse /kit upload <name>"); return true; }
                 if(!getConfig().contains("kits."+kitName)) getConfig().set("kits."+kitName+".cooldown-seconds", 0);
@@ -823,21 +831,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 getConfig().set("kits."+kitName+".contents", uploaded);
                 getConfig().set("kits."+kitName+".armor", p.getInventory().getArmorContents());
                 getConfig().set("kits."+kitName+".offhand", p.getInventory().getItemInOffHand());
-                saveConfig(); reloadConfig(); tell(p,"&aUploaded and saved server-default kit &f"+kitName+"&a to config.yml. It will survive plugin updates that keep the server config."); return true;
+                saveConfig(); reloadConfig(); tell(p,"&aUploaded server-default kit &f"+kitName+"&a."); return true;
             }
-            if(a.length==1 && a[0].equalsIgnoreCase("editor")) { openKitMenu(p,"editor",null); return true; }
-            if(a.length==0) { openKitMenu(p, "claim", null); return true; }
-            String kit=normalizeKitName(a[0]); ConfigurationSection sec=getConfig().getConfigurationSection("kits."+kit);
-            if(sec==null){tell(p,"&cUnknown kit. Use /kit to view available kits.");return true;}
-            long cd=sec.getLong("cooldown-seconds",30)*1000L, now=System.currentTimeMillis(), next=kitCooldowns.getOrDefault(p.getUniqueId(),0L);
-            if(next>now){tell(p,"&cWait "+((next-now+999)/1000)+"s before using a kit again.");return true;}
-            String personal="player-kits."+p.getUniqueId()+"."+kit;
-            List<?> items=getConfig().getList(personal+".contents"); if(items==null) items=sec.getList("contents");
-            p.getInventory().clear(); if(items!=null) for(int i=0;i<Math.min(items.size(),p.getInventory().getSize());i++) if(items.get(i) instanceof ItemStack item) p.getInventory().setItem(i,item.clone());
-            List<?> armor=getConfig().getList(personal+".armor"); if(armor==null) armor=sec.getList("armor");
-            if(armor!=null) { ItemStack[] arr=new ItemStack[4]; for(int i=0;i<Math.min(4,armor.size());i++) if(armor.get(i) instanceof ItemStack it) arr[i]=it.clone(); p.getInventory().setArmorContents(arr); }
-            ItemStack off=getConfig().getItemStack(personal+".offhand"); if(off==null) off=sec.getItemStack("offhand"); if(off!=null) p.getInventory().setItemInOffHand(off.clone());
-            kitCooldowns.put(p.getUniqueId(),now+cd);tell(p,"&dKit claimed: &f"+kit); giveDuelItem(p); giveKitEditor(p); return true;
+            tell(p, isDev(p) ? "&cUse /kit upload <name> or /kit clear." : "&cKit commands are unavailable. Use the Duel sword to select a kit.");
+            return true;
         }
         if(n.equals("duel")) {
             if(!(s instanceof Player p)||a.length<1){tell(s,"Use /duel <player>");return true;} Player target=Bukkit.getPlayerExact(a[0]);
@@ -869,7 +866,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("back")) { if(!(s instanceof Player p))return true; Location l=lastLocations.get(p.getUniqueId()); if(l==null){tell(p,"&cNo previous location saved.");return true;} if(tagged(p)){tell(p,"&cYou cannot use /back during combat.");return true;} p.teleport(l);tell(p,"&dReturned to your previous location.");return true; }
         if(n.equals("tphere")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(!(s instanceof Player p)||a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}t.teleport(p);tell(s,"&dTeleported "+t.getName()+" to you.");return true; }
         if(n.equals("gamemode")) {
-            if(!isDev(s)){tell(s,"&cOnly Owner can use /gamemode. Admins may use /gmsp.");return true;}
+            if(!isDev(s)){tell(s,"&cOnly Owner can use /gamemode. Mods and above may use /gms and /gmsp.");return true;}
             if(a.length < 1 || a.length > 2){tell(s,"&cUsage: /gamemode <mode> [player]");return true;}
             GameMode mode;
             try { mode = switch(a[0].toLowerCase(Locale.ROOT)) { case "s","survival" -> GameMode.SURVIVAL; case "c","creative" -> GameMode.CREATIVE; case "a","adventure" -> GameMode.ADVENTURE; case "sp","spectator" -> GameMode.SPECTATOR; default -> throw new IllegalArgumentException(); }; }
@@ -986,8 +983,17 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     private void giveDuelKit(Player p,String kit) {
         String path="player-kits."+p.getUniqueId()+"."+kit; if(!getConfig().contains("kits."+kit)){kit="sword";path="kits.sword";} else if(getConfig().contains(path+".contents")){} else path="kits."+kit;
-        List<?> contents=getConfig().getList(path+".contents");p.getInventory().clear();if(contents!=null)for(int i=0;i<Math.min(36,contents.size());i++)if(contents.get(i) instanceof ItemStack it)p.getInventory().setItem(i,it.clone());
-        List<?> armor=getConfig().getList(path+".armor");if(armor!=null){ItemStack[] arr=new ItemStack[4];for(int i=0;i<Math.min(4,armor.size());i++)if(armor.get(i) instanceof ItemStack it)arr[i]=it.clone();p.getInventory().setArmorContents(arr);} ItemStack off=getConfig().getItemStack(path+".offhand");if(off!=null)p.getInventory().setItemInOffHand(off.clone());
+        List<?> contents=getConfig().getList(path+".contents");
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(new ItemStack[4]);
+        p.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
+        if(contents!=null)for(int i=0;i<Math.min(36,contents.size());i++)if(contents.get(i) instanceof ItemStack it)p.getInventory().setItem(i,it.clone());
+        List<?> armor=getConfig().getList(path+".armor");
+        ItemStack[] arr=new ItemStack[4];
+        if(armor!=null)for(int i=0;i<Math.min(4,armor.size());i++)if(armor.get(i) instanceof ItemStack it)arr[i]=it.clone();
+        p.getInventory().setArmorContents(arr);
+        ItemStack off=getConfig().getItemStack(path+".offhand");
+        p.getInventory().setItemInOffHand(off==null?new ItemStack(Material.AIR):off.clone());
     }
     private void finishDuel(Player winner,Player loser) {
         if(winner==null||loser==null)return;
@@ -996,6 +1002,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         final String finishedArenaId = arenaId == null ? null : String.valueOf(arenaId);
         activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId());arenaCombat.remove(winner.getUniqueId());arenaCombat.remove(loser.getUniqueId());combatUntil.remove(winner.getUniqueId());combatUntil.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
         winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
+        if (winner.isOnline()) winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
+        if (loser.isOnline()) loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
         pendingDuelLosers.add(loser.getUniqueId());if(loser.isOnline()&&!loser.isDead())loser.setGameMode(GameMode.SPECTATOR);
         Bukkit.getScheduler().runTaskLater(this, () -> {
             String spawnWorldName = getConfig().getString("spawn.world", "");
@@ -1020,7 +1028,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 pendingDuelLosers.remove(loser.getUniqueId());
                 giveDuelItem(loser);
                 giveKitEditor(loser);
-                loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
             }
             if (winner.isOnline()) {
                 winner.setGameMode(GameMode.SURVIVAL);
@@ -1032,7 +1039,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 if (spawnLocation != null) winner.teleport(spawnLocation);
                 giveDuelItem(winner);
                 giveKitEditor(winner);
-                winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
             }
             // Once both players have returned, remove any dropped duel items/projectiles from the arena.
             if (finishedArenaId != null) {
