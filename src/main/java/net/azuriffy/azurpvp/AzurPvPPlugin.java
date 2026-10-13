@@ -471,6 +471,42 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }
     }
+    // Prevent the vanilla death/respawn screen for duel losses. Intercept lethal damage
+    // before health reaches zero, then finish the duel and put the loser in spectator.
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onLethalDuelDamage(org.bukkit.event.entity.EntityDamageEvent e) {
+        if (!(e.getEntity() instanceof Player loser)) return;
+        UUID otherId = activeDuels.get(loser.getUniqueId());
+        if (otherId == null || e.getFinalDamage() < loser.getHealth()) return;
+        Player winner = Bukkit.getPlayer(otherId);
+        e.setCancelled(true);
+        loser.setHealth(Math.max(1.0, Math.min(loser.getHealth(), 1.0)));
+        if (winner != null && winner.isOnline()) {
+            finishDuel(winner, loser);
+        } else {
+            activeDuels.remove(loser.getUniqueId());
+            pendingDuelLosers.add(loser.getUniqueId());
+            loser.setGameMode(GameMode.SPECTATOR);
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (!loser.isOnline()) return;
+                String worldName = getConfig().getString("spawn.world", "");
+                World world = Bukkit.getWorld(worldName);
+                if (world != null) loser.teleport(new Location(world,
+                    getConfig().getDouble("spawn.x", 0.5), getConfig().getDouble("spawn.y", 80),
+                    getConfig().getDouble("spawn.z", 0.5),
+                    (float) getConfig().getDouble("spawn.yaw", 0),
+                    (float) getConfig().getDouble("spawn.pitch", 0)));
+                loser.setGameMode(GameMode.SURVIVAL);
+                loser.getInventory().clear();
+                loser.getInventory().setArmorContents(null);
+                loser.getInventory().setItemInOffHand(null);
+                pendingDuelLosers.remove(loser.getUniqueId());
+                giveDuelItem(loser);
+                giveKitEditor(loser);
+            }, 100L);
+        }
+    }
+
     @EventHandler public void onDeath(PlayerDeathEvent e) {
         Player victim=e.getEntity(); Player killer=victim.getKiller();
         stat(victim.getUniqueId(),"deaths",1); stat(victim.getUniqueId(),"streak",-getStat(victim.getUniqueId(),"streak"));
