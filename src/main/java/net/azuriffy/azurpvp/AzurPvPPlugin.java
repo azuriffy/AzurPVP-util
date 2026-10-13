@@ -56,6 +56,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class AzurPvPPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
     private Connection db;
     private final Map<UUID, Long> combatUntil = new ConcurrentHashMap<>();
+    private final Set<UUID> arenaCombat = ConcurrentHashMap.newKeySet();
     private final Map<UUID, UUID> duelRequests = new ConcurrentHashMap<>();
     private final Map<UUID, String> duelChosenKits = new ConcurrentHashMap<>();
     private final Map<UUID, String> duelTargets = new ConcurrentHashMap<>();
@@ -396,7 +397,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         combatUntil.put(p.getUniqueId(), System.currentTimeMillis() + getConfig().getLong("combat.tag-seconds",15)*1000L);
 
     }
-    private boolean tagged(Player p) { return combatUntil.getOrDefault(p.getUniqueId(),0L) > System.currentTimeMillis(); }
+    private boolean tagged(Player p) { return arenaCombat.contains(p.getUniqueId()) || combatUntil.getOrDefault(p.getUniqueId(),0L) > System.currentTimeMillis(); }
     private void updateCombat() {
         long now = System.currentTimeMillis();
         for (UUID id : new ArrayList<>(combatUntil.keySet())) {
@@ -455,6 +456,26 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     (float) getConfig().getDouble("spawn.yaw", 0.0),
                     (float) getConfig().getDouble("spawn.pitch", 0.0));
             p.teleport(spawnLocation);
+            List<String> loggedLosses = getConfig().getStringList("combat.logged-losses");
+            String uuid = p.getUniqueId().toString();
+            if (loggedLosses.contains(uuid)) {
+                // A combat logger must not carry their duel kit/armor back into spawn.
+                p.getInventory().clear();
+                p.getInventory().setArmorContents(null);
+                p.getInventory().setItemInOffHand(null);
+                p.setFireTicks(0);
+                p.setFallDistance(0);
+                p.setHealth(p.getMaxHealth());
+                p.setFoodLevel(20);
+                p.setSaturation(20.0f);
+                loggedLosses.removeIf(uuid::equals);
+                getConfig().set("combat.logged-losses", loggedLosses);
+                saveConfig();
+                p.sendMessage(prefix() + c("&cYou combat logged and lost your last match."));
+                p.playSound(p.getLocation(), org.bukkit.Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
+                giveDuelItem(p);
+                giveKitEditor(p);
+            }
         });
         e.setJoinMessage(c("&8[&a+&8] &d" + p.getName()));
         p.sendTitle(c("&5&lAZUR&d&lPVP"), c("&7Welcome to the arena"), 10, 45, 15);
@@ -463,7 +484,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void onQuit(PlayerQuitEvent e) {
         Player p=e.getPlayer(); e.setQuitMessage(c("&8[&c-&8] &d"+p.getName()));
-        if (tagged(p) && getConfig().getBoolean("combat.punish-logout",true) && !p.hasPermission("azurpvp.bypass.combattag")) {
+        if (tagged(p) && !activeDuels.containsKey(p.getUniqueId()) && getConfig().getBoolean("combat.punish-logout",true) && !p.hasPermission("azurpvp.bypass.combattag")) {
             if ("KILL".equalsIgnoreCase(getConfig().getString("combat.punishment","KILL"))) p.setHealth(0.0);
             else for (ItemStack item : p.getInventory().getContents()) if (item != null) p.getWorld().dropItemNaturally(p.getLocation(),item);
         }
@@ -946,17 +967,23 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Bukkit.getScheduler().runTaskLater(this,()->{
             if(!activeDuels.containsKey(first.getUniqueId())||!activeDuels.containsKey(second.getUniqueId())||!first.isOnline()||!second.isOnline())return;
             first.teleport(arenaSpawn(selectedArena,1)); second.teleport(arenaSpawn(selectedArena,2));
+            // Duel combat tagging begins on arena entry and remains until the duel ends.
+            arenaCombat.add(first.getUniqueId());
+            arenaCombat.add(second.getUniqueId());
             // Equip the selected kits only after both players have arrived at their arena spawns.
             giveDuelKit(first, duelChosenKits.getOrDefault(first.getUniqueId(), "sword"));
             giveDuelKit(second, duelChosenKits.getOrDefault(second.getUniqueId(), "sword"));
             first.setHealth(first.getMaxHealth()); second.setHealth(second.getMaxHealth());
             first.setFoodLevel(20); second.setFoodLevel(20);
-            first.setSaturation(20.0f); second.setSaturation(20.0f);
+            first.setSaturation(0.0f); second.setSaturation(0.0f);
+            // Start each duel at zero saturation; afterward food items and golden apples
+            // can restore saturation normally during the fight.
             first.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0); second.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0);
             for(int sec=4;sec>=1;sec--){final int n=sec;Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);}},(5-sec)*20L);}
             Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){duelCountdown.remove(first.getUniqueId());duelCountdown.remove(second.getUniqueId());first.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);second.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);}},100L);
         },60L);
     }
+
     private void giveDuelKit(Player p,String kit) {
         String path="player-kits."+p.getUniqueId()+"."+kit; if(!getConfig().contains("kits."+kit)){kit="sword";path="kits.sword";} else if(getConfig().contains(path+".contents")){} else path="kits."+kit;
         List<?> contents=getConfig().getList(path+".contents");p.getInventory().clear();if(contents!=null)for(int i=0;i<Math.min(36,contents.size());i++)if(contents.get(i) instanceof ItemStack it)p.getInventory().setItem(i,it.clone());
@@ -967,10 +994,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Integer arenaId = duelArenaByPlayer.get(winner.getUniqueId());
         if (arenaId == null) arenaId = duelArenaByPlayer.get(loser.getUniqueId());
         final String finishedArenaId = arenaId == null ? null : String.valueOf(arenaId);
-        activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
+        activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId());arenaCombat.remove(winner.getUniqueId());arenaCombat.remove(loser.getUniqueId());combatUntil.remove(winner.getUniqueId());combatUntil.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
         winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
-        if (winner.isOnline()) winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
-        if (loser.isOnline()) loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_DEATH, 1.0f, 0.9f);
         pendingDuelLosers.add(loser.getUniqueId());if(loser.isOnline()&&!loser.isDead())loser.setGameMode(GameMode.SPECTATOR);
         Bukkit.getScheduler().runTaskLater(this, () -> {
             String spawnWorldName = getConfig().getString("spawn.world", "");
@@ -995,6 +1020,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 pendingDuelLosers.remove(loser.getUniqueId());
                 giveDuelItem(loser);
                 giveKitEditor(loser);
+                loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
             }
             if (winner.isOnline()) {
                 winner.setGameMode(GameMode.SURVIVAL);
@@ -1006,6 +1032,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 if (spawnLocation != null) winner.teleport(spawnLocation);
                 giveDuelItem(winner);
                 giveKitEditor(winner);
+                winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
             }
             // Once both players have returned, remove any dropped duel items/projectiles from the arena.
             if (finishedArenaId != null) {
@@ -1197,9 +1224,17 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         duelQueue.remove(id);
         UUID other = activeDuels.get(id);
         if (other != null) {
+            List<String> loggedLosses = getConfig().getStringList("combat.logged-losses");
+            String uuid = id.toString();
+            if (!loggedLosses.contains(uuid)) loggedLosses.add(uuid);
+            getConfig().set("combat.logged-losses", loggedLosses);
+            saveConfig();
+            arenaCombat.remove(id);
             Player opponent = Bukkit.getPlayer(other);
-            if (opponent != null) finishDuel(opponent, e.getPlayer());
+            if (opponent != null && opponent.isOnline()) finishDuel(opponent, e.getPlayer());
         }
+        arenaCombat.remove(id);
+        combatUntil.remove(id);
     }
     @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); giveKitEditor(e.getPlayer()); }
     @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Player p=e.getPlayer(); Bukkit.getScheduler().runTask(this,()->{if(pendingDuelLosers.contains(p.getUniqueId()))p.setGameMode(GameMode.SPECTATOR);else {giveDuelItem(p);giveKitEditor(p);}}); }
