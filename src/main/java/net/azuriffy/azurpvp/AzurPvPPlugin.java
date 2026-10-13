@@ -841,8 +841,14 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 String kitName=normalizeKitName(a[1]);
                 if(kitName.isBlank()) { tell(p,"&cUse /kit upload <name>"); return true; }
                 if(!getConfig().contains("kits."+kitName)) getConfig().set("kits."+kitName+".cooldown-seconds", 0);
-                ItemStack[] uploaded=p.getInventory().getContents();
-                for(int i=0;i<uploaded.length;i++) if(isDuelItem(uploaded[i]) || isKitEditor(uploaded[i])) uploaded[i]=null;
+                // Store only the 36 storage slots. Bukkit's getContents() also includes
+                // armor and offhand slots, which must be saved separately below.
+                ItemStack[] playerContents = p.getInventory().getStorageContents();
+                ItemStack[] uploaded = new ItemStack[36];
+                for (int i = 0; i < 36; i++) {
+                    ItemStack item = i < playerContents.length ? playerContents[i] : null;
+                    uploaded[i] = (item == null || isDuelItem(item) || isKitEditor(item)) ? null : item.clone();
+                }
                 getConfig().set("kits."+kitName+".contents", uploaded);
                 getConfig().set("kits."+kitName+".armor", p.getInventory().getArmorContents());
                 getConfig().set("kits."+kitName+".offhand", p.getInventory().getItemInOffHand());
@@ -935,12 +941,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (playerKits.containsKey(normalizedKit)) {
             playerKits.remove(normalizedKit);
             if (playerKits.isEmpty()) duelQueue.remove(playerId);
-            player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 1.0f, 0.7f);
+            player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.65f);
             tell(player, "&eRemoved &f" + prettyKitName(normalizedKit) + " &efrom your queue.");
             return;
         }
         playerKits.put(normalizedKit, System.currentTimeMillis());
-        player.playSound(player.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 1.0f, 1.4f);
+        player.playSound(player.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.8f, 1.5f);
         tell(player, "&dQueued for &f" + prettyKitName(normalizedKit) + "&d. Click the same kit again to leave that queue.");
 
         Player opponent = null;
@@ -1119,7 +1125,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String path="player-kits."+p.getUniqueId()+"."+kit+".contents";
         List<?> contents=getConfig().getList(path);
         if(contents==null) contents=getConfig().getList("kits."+kit+".contents");
-        if(contents!=null) for(int i=0;i<Math.min(45,contents.size());i++) if(contents.get(i) instanceof ItemStack it) inv.setItem(i,it.clone());
+        // Only slots 0-35 are player storage. Older kit data may contain armor/offhand
+        // appended to contents (from Bukkit's 41-slot getContents()); ignore those legacy entries.
+        if(contents!=null) for(int i=0;i<Math.min(36,contents.size());i++) if(contents.get(i) instanceof ItemStack it) inv.setItem(i,it.clone());
+        ItemStack filler = namedItem(Material.GRAY_STAINED_GLASS_PANE, "&8", List.of());
+        for (int slot = 36; slot <= 44; slot++) inv.setItem(slot, filler.clone());
+        inv.setItem(50, filler.clone());
+        inv.setItem(52, filler.clone());
         List<?> armor=getConfig().getList("player-kits."+p.getUniqueId()+"."+kit+".armor");
         if(armor==null) armor=getConfig().getList("kits."+kit+".armor");
         if(armor!=null) for(int i=0;i<Math.min(4,armor.size());i++) if(armor.get(i) instanceof ItemStack it) inv.setItem(45+i,it.clone());
@@ -1132,7 +1144,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private void saveEditedKit(Player p, Inventory inv) {
         String kit=duelChosenKits.get(p.getUniqueId()); if(kit==null)return;
-        ItemStack[] contents=new ItemStack[45]; for(int i=0;i<45;i++){ItemStack it=inv.getItem(i);contents[i]=it==null?null:it.clone();}
+        ItemStack[] contents=new ItemStack[36];
+        for(int i=0;i<36;i++){ItemStack it=inv.getItem(i);contents[i]=it==null||it.getType()==Material.AIR?null:it.clone();}
         ItemStack[] armor=new ItemStack[4]; for(int i=0;i<4;i++){ItemStack it=inv.getItem(45+i);armor[i]=it==null?null:it.clone();}
         ItemStack offhand=inv.getItem(49);
         getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".contents",contents);
@@ -1230,7 +1243,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(e.getClickedInventory()!=e.getView().getTopInventory()) { e.setCancelled(true); return; }
             if(e.getSlot()==51) { e.setCancelled(true); saveEditedKit(p,e.getView().getTopInventory()); return; }
             if(e.getSlot()==53) { e.setCancelled(true); resetEditedKit(p); return; }
-            if(e.getSlot()>=50) { e.setCancelled(true); return; }
+            int slot = e.getSlot();
+            if ((slot >= 36 && slot <= 44) || slot == 50 || slot == 52 || slot >= 54) { e.setCancelled(true); return; }
             return;
         }
         if (!title.contains("Select a Kit") && !title.contains("Kit Editor") && !title.contains("Duel Settings")) return;
@@ -1251,7 +1265,20 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             else if(e.getSlot()==16) { String targetName=duelTargets.get(p.getUniqueId()); Player target=targetName==null?null:Bukkit.getPlayerExact(targetName); if(target==null){p.closeInventory();tell(p,"&cYour opponent is no longer online.");return;} duelRequests.put(target.getUniqueId(),p.getUniqueId()); p.closeInventory(); tell(p,"&dDuel request sent to &f"+target.getName()+"&d. Kit: &f"+duelChosenKits.getOrDefault(p.getUniqueId(),"default")+"&d, rounds: &f"+duelRounds.getOrDefault(p.getUniqueId(),3)+"&d, map: &f"+duelMaps.getOrDefault(p.getUniqueId(),"random")); tell(target,"&d"+p.getName()+" challenged you! Use &f/accept "+p.getName()+"&d."); }
         }
     }
-    @EventHandler public void onDuelInventoryDrag(InventoryDragEvent e) { String title=ChatColor.stripColor(e.getView().getTitle()); if(title!=null&&(title.contains("Select a Kit")||title.contains("Kit Editor")||title.contains("Duel Settings")||title.startsWith("Editing:"))) { if(title.startsWith("Editing:") && e.getRawSlots().stream().allMatch(slot -> slot < 50)) return; e.setCancelled(true); } }
+    @EventHandler public void onDuelInventoryDrag(InventoryDragEvent e) {
+        String title = ChatColor.stripColor(e.getView().getTitle());
+        if (title == null) return;
+        if (title.contains("Select a Kit") || title.contains("Kit Editor") || title.contains("Duel Settings")) {
+            e.setCancelled(true);
+            return;
+        }
+        if (title.startsWith("Editing:")) {
+            // Only the 36 storage slots, four armor slots, and offhand slot are editable.
+            boolean allowed = e.getRawSlots().stream().allMatch(slot ->
+                    slot < 36 || (slot >= 45 && slot <= 49));
+            if (!allowed) e.setCancelled(true);
+        }
+    }
     @EventHandler public void onDuelQuit(PlayerQuitEvent e) {
         UUID id = e.getPlayer().getUniqueId();
         duelQueue.remove(id);
