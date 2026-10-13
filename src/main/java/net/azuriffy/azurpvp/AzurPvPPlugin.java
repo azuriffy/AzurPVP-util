@@ -13,6 +13,15 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.GameMode;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.Item;
+import org.bukkit.entity.Arrow;
+import org.bukkit.entity.Trident;
+import org.bukkit.entity.Snowball;
+import org.bukkit.entity.Egg;
+import org.bukkit.entity.EnderPearl;
+import org.bukkit.entity.ExperienceOrb;
+import org.bukkit.entity.Firework;
 import org.bukkit.event.*;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
@@ -93,7 +102,19 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
         getServer().getPluginManager().registerEvents(this, this);
-        combatTask = Bukkit.getScheduler().runTaskTimer(this, () -> { updateCombat(); updateQueueActionBars(); }, 1L, 10L);
+        combatTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            updateCombat(); updateQueueActionBars();
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (inSpawnProtection(online.getLocation()) && !activeDuels.containsKey(online.getUniqueId())) {
+                    online.setHealth(online.getMaxHealth());
+                    online.setFoodLevel(20);
+                    online.setSaturation(20.0f);
+                    online.setExhaustion(0.0f);
+                    online.setFireTicks(0);
+                    online.setFreezeTicks(0);
+                }
+            }
+        }, 1L, 10L);
         // Periodic world saves reduce data loss on clean restarts; host-level resets still need host configuration fixed.
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             for (World world : Bukkit.getWorlds()) {
@@ -421,6 +442,20 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         updateTabRole(p);
         updateAzurTabAndScoreboard(p);
         if (getConfig().getBoolean("maintenance.enabled", false) && !isStaff(p)) { Bukkit.getScheduler().runTask(this, () -> p.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled."))); return; }
+        // Always send players to the configured /setspawn point after joining, rather than their logout location.
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (!p.isOnline()) return;
+            String spawnWorldName = getConfig().getString("spawn.world", "");
+            World spawnWorld = Bukkit.getWorld(spawnWorldName);
+            if (spawnWorld == null) return; // /setspawn has not been configured or its world is not loaded.
+            Location spawnLocation = new Location(spawnWorld,
+                    getConfig().getDouble("spawn.x", 0.5),
+                    getConfig().getDouble("spawn.y", 80.0),
+                    getConfig().getDouble("spawn.z", 0.5),
+                    (float) getConfig().getDouble("spawn.yaw", 0.0),
+                    (float) getConfig().getDouble("spawn.pitch", 0.0));
+            p.teleport(spawnLocation);
+        });
         e.setJoinMessage(c("&8[&a+&8] &d" + p.getName()));
         p.sendTitle(c("&5&lAZUR&d&lPVP"), c("&7Welcome to the arena"), 10, 45, 15);
         giveDuelItem(p); giveKitEditor(p);
@@ -450,9 +485,25 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void protectSpawnBlockBreak(BlockBreakEvent e) {
         if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); return; }
-        for(String key: arenaKeys()) { String path="arenas."+key; Location center=arenaCenter(key); if(center!=null && center.getWorld().equals(e.getBlock().getWorld()) && center.distanceSquared(e.getBlock().getLocation())<=10000.0) { boolean allowed=getConfig().getBoolean(path+".break-below-zero",false); if(!allowed || e.getBlock().getY()>=0) e.setCancelled(true); return; } }
+        for (String key : arenaKeys()) {
+            Location center = arenaCenter(key);
+            if (center != null && center.getWorld().equals(e.getBlock().getWorld()) && center.distanceSquared(e.getBlock().getLocation()) <= 10000.0) {
+                e.setCancelled(true);
+                return;
+            }
+        }
     }
-    @EventHandler public void protectSpawnBlockPlace(BlockPlaceEvent e) { if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); } }
+    @EventHandler public void protectSpawnBlockPlace(BlockPlaceEvent e) {
+        Location location = e.getBlock().getLocation();
+        if (inSpawnProtection(location)) { e.setCancelled(true); tell(e.getPlayer(), "&cSpawn protection: building is disabled here."); return; }
+        for (String key : arenaKeys()) {
+            Location center = arenaCenter(key);
+            if (center != null && center.getWorld().equals(location.getWorld()) && center.distanceSquared(location) <= 10000.0) {
+                e.setCancelled(true);
+                return;
+            }
+        }
+    }
     @EventHandler public void protectSpawnInteractions(PlayerInteractEvent e) {
         if (e.getClickedBlock()==null || !inSpawnProtection(e.getClickedBlock().getLocation())) return;
         Material type=e.getClickedBlock().getType();
@@ -460,6 +511,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (!type.name().endsWith("SHULKER_BOX")) { e.setCancelled(true); tell(e.getPlayer(),"&cContainer access is disabled in spawn protection."); }
         }
     }
+    @EventHandler public void protectSpawnFromAllDamage(org.bukkit.event.entity.EntityDamageEvent e) {
+        if (e.getEntity() instanceof Player player && inSpawnProtection(player.getLocation())
+                && !activeDuels.containsKey(player.getUniqueId())) {
+            e.setCancelled(true);
+        }
+    }
+
     @EventHandler public void onDamage(org.bukkit.event.entity.EntityDamageByEntityEvent e) {
         if (e.getEntity() instanceof Player victim && e.getDamager() instanceof Player attacker) {
             if (duelCountdown.contains(victim.getUniqueId()) || duelCountdown.contains(attacker.getUniqueId())) { e.setCancelled(true); return; }
@@ -880,7 +938,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return; }
         activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),Integer.parseInt(selectedArena));duelArenaByPlayer.put(second.getUniqueId(),Integer.parseInt(selectedArena)); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
         first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
-        giveDuelKit(first,duelChosenKits.getOrDefault(first.getUniqueId(),"sword"));giveDuelKit(second,duelChosenKits.getOrDefault(second.getUniqueId(),"sword"));
         tell(first,"&aDuel accepted: &f"+second.getName()+"&a!"); tell(second,"&aDuel accepted: &f"+first.getName()+"&a!");
         first.playSound(first.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
         second.playSound(second.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
@@ -889,7 +946,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Bukkit.getScheduler().runTaskLater(this,()->{
             if(!activeDuels.containsKey(first.getUniqueId())||!activeDuels.containsKey(second.getUniqueId())||!first.isOnline()||!second.isOnline())return;
             first.teleport(arenaSpawn(selectedArena,1)); second.teleport(arenaSpawn(selectedArena,2));
-            first.setHealth(first.getMaxHealth()); second.setHealth(second.getMaxHealth()); first.setFoodLevel(20); second.setFoodLevel(20);
+            // Equip the selected kits only after both players have arrived at their arena spawns.
+            giveDuelKit(first, duelChosenKits.getOrDefault(first.getUniqueId(), "sword"));
+            giveDuelKit(second, duelChosenKits.getOrDefault(second.getUniqueId(), "sword"));
+            first.setHealth(first.getMaxHealth()); second.setHealth(second.getMaxHealth());
+            first.setFoodLevel(20); second.setFoodLevel(20);
+            first.setSaturation(20.0f); second.setSaturation(20.0f);
             first.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0); second.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0);
             for(int sec=4;sec>=1;sec--){final int n=sec;Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);}},(5-sec)*20L);}
             Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){duelCountdown.remove(first.getUniqueId());duelCountdown.remove(second.getUniqueId());first.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);second.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);}},100L);
@@ -901,8 +963,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         List<?> armor=getConfig().getList(path+".armor");if(armor!=null){ItemStack[] arr=new ItemStack[4];for(int i=0;i<Math.min(4,armor.size());i++)if(armor.get(i) instanceof ItemStack it)arr[i]=it.clone();p.getInventory().setArmorContents(arr);} ItemStack off=getConfig().getItemStack(path+".offhand");if(off!=null)p.getInventory().setItemInOffHand(off.clone());
     }
     private void finishDuel(Player winner,Player loser) {
-        if(winner==null||loser==null)return; activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
-        winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);pendingDuelLosers.add(loser.getUniqueId());if(loser.isOnline()&&!loser.isDead())loser.setGameMode(GameMode.SPECTATOR);
+        if(winner==null||loser==null)return;
+        Integer arenaId = duelArenaByPlayer.get(winner.getUniqueId());
+        if (arenaId == null) arenaId = duelArenaByPlayer.get(loser.getUniqueId());
+        final String finishedArenaId = arenaId == null ? null : String.valueOf(arenaId);
+        activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
+        winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
+        if (winner.isOnline()) winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
+        if (loser.isOnline()) loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_DEATH, 1.0f, 0.9f);
+        pendingDuelLosers.add(loser.getUniqueId());if(loser.isOnline()&&!loser.isDead())loser.setGameMode(GameMode.SPECTATOR);
         Bukkit.getScheduler().runTaskLater(this, () -> {
             String spawnWorldName = getConfig().getString("spawn.world", "");
             World spawnWorld = Bukkit.getWorld(spawnWorldName);
@@ -938,8 +1007,25 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 giveDuelItem(winner);
                 giveKitEditor(winner);
             }
+            // Once both players have returned, remove any dropped duel items/projectiles from the arena.
+            if (finishedArenaId != null) {
+                Bukkit.getScheduler().runTaskLater(this, () -> cleanArenaEntities(finishedArenaId), 1L);
+            }
         }, 100L);
     }
+
+    private void cleanArenaEntities(String arenaId) {
+        Location center = arenaCenter(arenaId);
+        if (center == null || center.getWorld() == null) return;
+        for (Entity entity : center.getWorld().getNearbyEntities(center, 100.0, 256.0, 100.0)) {
+            if (entity instanceof Item || entity instanceof Arrow || entity instanceof Trident
+                    || entity instanceof Snowball || entity instanceof Egg || entity instanceof EnderPearl
+                    || entity instanceof ExperienceOrb || entity instanceof Firework) {
+                entity.remove();
+            }
+        }
+    }
+
     private void openKitMenu(Player p, String mode, String target) {
         Inventory inv=Bukkit.createInventory(null,54,c(mode.equals("editor") ? "&5&lAzurPvP &8» &dKit Editor" : "&5&lAzurPvP &8» &dSelect a Kit"));
         ConfigurationSection kits=getConfig().getConfigurationSection("kits");
