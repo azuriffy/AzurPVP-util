@@ -78,6 +78,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public void onEnable() {
         saveDefaultConfig();
+        // One-time cleanup of placeholder arenas 1, 2, and 3 (including their spawn data).
+        // The marker prevents deleting them again if the owner creates those arenas later.
+        if (!getConfig().getBoolean("migrations.removed-placeholder-arenas-1-3", false)) {
+            for (String arenaId : List.of("1", "2", "3")) {
+                getConfig().set("arenas." + arenaId, null);
+            }
+            getConfig().set("migrations.removed-placeholder-arenas-1-3", true);
+            saveConfig();
+        }
         ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
