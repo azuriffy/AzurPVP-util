@@ -87,7 +87,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public void onEnable() {
         saveDefaultConfig();
-        cmodeWorlds.addAll(getConfig().getStringList("cmode-worlds"));
+        cmodeWorlds.addAll(getConfig().getStringList("cmode-bypass-worlds"));
         // One-time cleanup of placeholder arenas 1, 2, and 3 (including their spawn data).
         // The marker prevents deleting them again if the owner creates those arenas later.
         if (!getConfig().getBoolean("migrations.removed-placeholder-arenas-1-3", false)) {
@@ -518,8 +518,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         double dx=location.getX()-getConfig().getDouble("spawn.x"), dz=location.getZ()-getConfig().getDouble("spawn.z");
         return dx*dx+dz*dz <= 500.0*500.0;
     }
-    @EventHandler public void protectSpawnBlockBreak(BlockBreakEvent e) {
-        if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(true); return; }
+    @EventHandler(priority = EventPriority.HIGHEST) public void protectSpawnBlockBreak(BlockBreakEvent e) {
+        // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
+        if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(false); return; }
         if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); return; }
         for (String key : arenaKeys()) {
             Location center = arenaCenter(key);
@@ -529,8 +530,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }
     }
-    @EventHandler public void protectSpawnBlockPlace(BlockPlaceEvent e) {
-        if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(true); return; }
+    @EventHandler(priority = EventPriority.HIGHEST) public void protectSpawnBlockPlace(BlockPlaceEvent e) {
+        // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
+        if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(false); return; }
         Location location = e.getBlock().getLocation();
         if (inSpawnProtection(location)) { e.setCancelled(true); tell(e.getPlayer(), "&cSpawn protection: building is disabled here."); return; }
         for (String key : arenaKeys()) {
@@ -687,12 +689,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (!(s instanceof Player player)) { tell(s, "&cRun this command in-game while standing in the target world."); return true; }
             String worldName = player.getWorld().getName();
             if (cmodeWorlds.remove(worldName)) {
-                getConfig().set("cmode-worlds", new ArrayList<>(cmodeWorlds)); saveConfig();
-                tell(player, "&aCreative mode building restrictions disabled in &f" + worldName + "&a.");
+                getConfig().set("cmode-bypass-worlds", new ArrayList<>(cmodeWorlds)); saveConfig();
+                tell(player, "&e/cmode OFF: normal block protections restored in &f" + worldName + "&e.");
             } else {
                 cmodeWorlds.add(worldName);
-                getConfig().set("cmode-worlds", new ArrayList<>(cmodeWorlds)); saveConfig();
-                tell(player, "&cBlock placing and breaking disabled in &f" + worldName + "&c. Run /cmode again here to re-enable.");
+                getConfig().set("cmode-bypass-worlds", new ArrayList<>(cmodeWorlds)); saveConfig();
+                tell(player, "&a/cmode ON: block placing and breaking allowed in &f" + worldName + "&a, bypassing this plugin's protections. Run /cmode again here to turn it off.");
             }
             return true;
         }
