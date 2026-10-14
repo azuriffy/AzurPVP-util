@@ -13,9 +13,6 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.GameMode;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.entity.Player;
-import org.bukkit.entity.EntityType;
-import org.bukkit.entity.ArmorStand;
-import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Arrow;
@@ -71,7 +68,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Set<UUID> duelCountdown = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingDuelLosers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> duelArenaByPlayer = new ConcurrentHashMap<>();
-    private final Set<String> reservedArenaIds = ConcurrentHashMap.newKeySet();
     private static final String DUEL_ITEM_NAME = "§d§lDuel";
     private final Map<UUID, UUID> lastMessaged = new ConcurrentHashMap<>();
     private final Map<UUID, Set<UUID>> ignored = new ConcurrentHashMap<>();
@@ -104,7 +100,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "set", "cmode", "cpvparena", "npc")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "set", "cmode")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -294,7 +290,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
         Player p = e.getPlayer();
-        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set","cpvparena","npc");
+        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
         if (isDev(p)) return;
         e.getCommands().removeIf(command -> {
             String root = command.toLowerCase(Locale.ROOT).split(":")[0];
@@ -306,7 +302,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
-            case "setspawn","maintenance","backup","role","arena","addarena","set","world","tp","cmode","cpvparena","npc" -> "owner";
+            case "setspawn","maintenance","backup","role","arena","addarena","set","world","tp","cmode" -> "owner";
             case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
             default -> "member";
@@ -378,10 +374,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         File file = new File(getDataFolder(), getConfig().getString("database.file", "players.db"));
         db = DriverManager.getConnection("jdbc:sqlite:" + file.getAbsolutePath());
         try (Statement s = db.createStatement()) {
-            s.executeUpdate("CREATE TABLE IF NOT EXISTS stats (uuid TEXT PRIMARY KEY, name TEXT NOT NULL, kills INTEGER DEFAULT 0, deaths INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, playtime_seconds INTEGER DEFAULT 0, duel_wins INTEGER DEFAULT 0, duel_losses INTEGER DEFAULT 0)");
-            // Safe migrations for existing player databases.
-            try { s.executeUpdate("ALTER TABLE stats ADD COLUMN duel_wins INTEGER DEFAULT 0"); } catch (SQLException ignored) {}
-            try { s.executeUpdate("ALTER TABLE stats ADD COLUMN duel_losses INTEGER DEFAULT 0"); } catch (SQLException ignored) {}
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS stats (uuid TEXT PRIMARY KEY, name TEXT NOT NULL, kills INTEGER DEFAULT 0, deaths INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, playtime_seconds INTEGER DEFAULT 0)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, reporter TEXT, target TEXT, reason TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
         }
     }
@@ -394,7 +387,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     private String c(String s) { return ChatColor.translateAlternateColorCodes('&', s); }
-    private String prefix() { return " " + c("&d&lAzurPvP &8» &r"); }
+    private String prefix() { return c(getConfig().getString("prefix", "&8[&5AzurPvP&8] &r")); }
     private void tell(CommandSender sender, String message) { sender.sendMessage(prefix() + c(message)); }
     private void ensurePlayer(Player p) {
         try (PreparedStatement ps = db.prepareStatement("INSERT OR IGNORE INTO stats(uuid,name) VALUES(?,?)")) {
@@ -403,13 +396,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         } catch (SQLException e) { getLogger().warning("Stats update failed: " + e.getMessage()); }
     }
     private void stat(UUID uuid, String field, int delta) {
-        if (!Set.of("kills","deaths","streak","best_streak","duel_wins","duel_losses").contains(field)) return;
+        if (!Set.of("kills","deaths","streak","best_streak").contains(field)) return;
         try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET " + field + "=" + field + "+? WHERE uuid=?")) {
             ps.setInt(1, delta); ps.setString(2, uuid.toString()); ps.executeUpdate();
         } catch (SQLException e) { getLogger().warning("Stats write failed: " + e.getMessage()); }
     }
     private int getStat(UUID uuid, String field) {
-        if (!Set.of("kills","deaths","streak","best_streak","playtime_seconds","duel_wins","duel_losses").contains(field)) return 0;
+        if (!Set.of("kills","deaths","streak","best_streak","playtime_seconds").contains(field)) return 0;
         try (PreparedStatement ps = db.prepareStatement("SELECT " + field + " FROM stats WHERE uuid=?")) {
             ps.setString(1, uuid.toString()); try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
         } catch (SQLException e) { return 0; }
@@ -501,6 +494,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         e.setJoinMessage(c("&8[&a+&8] &d" + p.getName()));
         p.sendTitle(c("&5&lAZUR&d&lPVP"), c("&7Welcome to the arena"), 10, 45, 15);
         giveDuelItem(p); giveKitEditor(p);
+        p.sendMessage(prefix()+c("&7Use &d/azurpvp &7for plugin commands."));
     }
     @EventHandler public void onQuit(PlayerQuitEvent e) {
         Player p=e.getPlayer(); e.setQuitMessage(c("&8[&c-&8] &d"+p.getName()));
@@ -527,20 +521,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler(priority = EventPriority.HIGHEST) public void protectSpawnBlockBreak(BlockBreakEvent e) {
         // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
         if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(false); return; }
-        Location blockLocation=e.getBlock().getLocation();
-        ConfigurationSection miningAreas=getConfig().getConfigurationSection("cpvparenas");
-        if(miningAreas!=null) for(String id:miningAreas.getKeys(false)) {
-            String path="cpvparenas."+id; World w=e.getBlock().getWorld();
-            if(w.getName().equals(getConfig().getString(path+".world",""))) {
-                double dx=blockLocation.getX()-getConfig().getDouble(path+".x"), dz=blockLocation.getZ()-getConfig().getDouble(path+".z");
-                if(dx*dx+dz*dz<=Math.pow(getConfig().getDouble(path+".radius",200),2)) {
-                    int maxY=getConfig().getInt(path+".y-level",0); Material type=e.getBlock().getType();
-                    boolean allowed=blockLocation.getY()<maxY && (type==Material.GRASS_BLOCK || type==Material.DIRT || type==Material.COARSE_DIRT || type==Material.ROOTED_DIRT || type==Material.STONE || type==Material.DEEPSLATE || type==Material.COBBLED_DEEPSLATE);
-                    e.setCancelled(!allowed); return;
-                }
-            }
-        }
-        if(inSpawnProtection(blockLocation)) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); return; }
+        if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); return; }
         for (String key : arenaKeys()) {
             Location center = arenaCenter(key);
             if (center != null && center.getWorld().equals(e.getBlock().getWorld()) && center.distanceSquared(e.getBlock().getLocation()) <= 10000.0) {
@@ -562,18 +543,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }
     }
-    // The world is not a clickable lobby: cancel block interactions (signs, buttons, doors,
-    // containers, lecterns, etc.). Custom inventory GUIs and the Duel/Kit Editor items still work.
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
-    public void blockWorldInteractions(PlayerInteractEvent e) {
-        if (e.getClickedBlock() != null) e.setCancelled(true);
-    }
-
-    // Only NPCs registered by /npc may be interacted with. Ordinary entities are not clickable.
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
-    public void allowOnlyDuelNpcEntityInteractions(PlayerInteractEntityEvent e) {
-        Entity clicked = e.getRightClicked();
-        if (!getConfig().contains("duel-npcs." + clicked.getUniqueId() + ".kit")) e.setCancelled(true);
+    @EventHandler public void protectSpawnInteractions(PlayerInteractEvent e) {
+        if (e.getClickedBlock()==null || !inSpawnProtection(e.getClickedBlock().getLocation())) return;
+        Material type=e.getClickedBlock().getType();
+        if (type==Material.ENDER_CHEST || type==Material.CHEST || type==Material.TRAPPED_CHEST || type==Material.BARREL || type.name().endsWith("SHULKER_BOX")) {
+            if (!type.name().endsWith("SHULKER_BOX")) { e.setCancelled(true); tell(e.getPlayer(),"&cContainer access is disabled in spawn protection."); }
+        }
     }
     @EventHandler public void protectSpawnFromAllDamage(org.bukkit.event.entity.EntityDamageEvent e) {
         if (e.getEntity() instanceof Player player && inSpawnProtection(player.getLocation())
@@ -707,7 +682,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(w!=null)e.setRespawnLocation(new Location(w,getConfig().getDouble("spawn.x",0.5),getConfig().getDouble("spawn.y",80),getConfig().getDouble("spawn.z",0.5), (float)getConfig().getDouble("spawn.yaw",0),(float)getConfig().getDouble("spawn.pitch",0)));
     }
 
-    @Override public boolean onCommand(CommandSender s, Command cmd, String label, String[] a) {
+    @Override public boolean onCommand(CommandSender s, Command cmd, String commandLabel, String[] a) {
         String n=cmd.getName().toLowerCase(Locale.ROOT);
         if (n.equals("cmode")) {
             if (!isDev(s)) { tell(s, "&cOnly the Owner can use /cmode."); return true; }
@@ -810,36 +785,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             tell(p, "&dTeleported to &f" + destination.getName() + " &dat coordinates &f0,0&d.");
             return true;
         }
-        if(n.equals("cpvparena")) {
-            if(!isDev(s)){tell(s,"&cOnly the owner can configure CPvP mining areas.");return true;}
-            if(!(s instanceof Player p) || a.length != 2 || !a[0].equalsIgnoreCase("add")) { tell(s,"&cUsage: /cpvparena add <y-level>"); return true; }
-            int y; try { y=Integer.parseInt(a[1]); } catch(NumberFormatException ex) { tell(p,"&cY-level must be an integer."); return true; }
-            String id=UUID.randomUUID().toString().substring(0,8); Location l=p.getLocation(); String path="cpvparenas."+id;
-            getConfig().set(path+".world",l.getWorld().getName()); getConfig().set(path+".x",l.getX()); getConfig().set(path+".z",l.getZ()); getConfig().set(path+".y-level",y); getConfig().set(path+".radius",200); saveConfig();
-            tell(p,"&aCPvP mining area created: 200-block radius, only grass, dirt, stone and deepslate below Y="+y+" can be broken."); return true;
-        }
-        if(n.equals("npc")) {
-            if(!isDev(s)){tell(s,"&cOnly the owner can create duel NPCs.");return true;}
-            if(!(s instanceof Player p) || a.length < 3) { tell(s,"&cUsage: /npc <IGN> <title...> <duel type>"); return true; }
-            if(Bukkit.getPluginManager().getPlugin("Citizens") == null) { tell(p,"&cInstall Citizens on the server to create player-skin NPCs, then restart."); return true; }
-            String ign=a[0], kit=normalizeKitName(a[a.length-1]);
-            if(!getConfig().contains("kits."+kit)) { tell(p,"&cUnknown duel type/kit: "+a[a.length-1]); return true; }
-            String title=String.join(" ",Arrays.copyOfRange(a,1,a.length-1));
-            try {
-                Class<?> api=Class.forName("net.citizensnpcs.api.CitizensAPI"); Object registry=api.getMethod("getNPCRegistry").invoke(null);
-                Object npc=null; for(java.lang.reflect.Method m:registry.getClass().getMethods()) if(m.getName().equals("createNPC") && m.getParameterCount()==2 && m.getParameterTypes()[0]==EntityType.class) { npc=m.invoke(registry,EntityType.PLAYER,ign); break; }
-                if(npc==null) throw new IllegalStateException("Citizens NPC create method unavailable");
-                try { Class<?> skinTrait=Class.forName("net.citizensnpcs.trait.SkinTrait"); Object trait=npc.getClass().getMethod("getOrAddTrait",Class.class).invoke(npc,skinTrait); skinTrait.getMethod("setSkinName",String.class).invoke(trait,ign); } catch(ReflectiveOperationException ignored) {}
-                npc.getClass().getMethod("spawn",Location.class).invoke(npc,p.getLocation());
-                Object entity=npc.getClass().getMethod("getEntity").invoke(npc);
-                if(entity instanceof Entity spawned) {
-                    String npcId=spawned.getUniqueId().toString(); getConfig().set("duel-npcs."+npcId+".kit",kit); getConfig().set("duel-npcs."+npcId+".title",title); getConfig().set("duel-npcs."+npcId+".ign",ign); saveConfig();
-                    Location label=spawned.getLocation().clone().add(0,2.25,0); ArmorStand stand=(ArmorStand) spawned.getWorld().spawnEntity(label,EntityType.ARMOR_STAND); stand.setVisible(false); stand.setGravity(false); stand.setMarker(true); stand.setCustomNameVisible(true); stand.setCustomName(c("&5&l"+title)); stand.setInvulnerable(true); stand.setPersistent(true); getConfig().set("duel-npcs."+npcId+".label",stand.getUniqueId().toString()); saveConfig();
-                    tell(p,"&aSpawned duel NPC for &f"+ign+" &awith title &5"+title+" &aand kit &f"+prettyKitName(kit)+"&a."); return true;
-                }
-                throw new IllegalStateException("NPC entity was not created");
-            } catch(Exception ex) { getLogger().warning("Could not create duel NPC: "+ex.getMessage()); tell(p,"&cNPC creation failed. Check the server console and Citizens version."); return true; }
-        }
         if(n.equals("addarena")) {
             if(!isDev(s)){tell(s,"&cOnly the owner can create arenas.");return true;}
             if(!(s instanceof Player p)||a.length!=2){tell(s,"&cUsage: /addarena <number> <true/false>");return true;}
@@ -871,8 +816,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             int k=getStat(target.getUniqueId(),"kills"), d=getStat(target.getUniqueId(),"deaths");
             tell(s,"&dStats for &f"+(target.getName()==null?"Unknown":target.getName()));
             tell(s,"&7Kills: &d"+k+" &8| &7Deaths: &d"+d+" &8| &7KDR: &d"+String.format(Locale.US,"%.2f",d==0?k:(double)k/d));
-            tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak"));
-            tell(s,"&7Duel wins: &a"+getStat(target.getUniqueId(),"duel_wins")+" &8| &7Duel losses: &c"+getStat(target.getUniqueId(),"duel_losses")); return true;
+            tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak")); return true;
         }
         if(n.equals("kit")) {
             if(!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
@@ -907,11 +851,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     ItemStack item = i < playerContents.length ? playerContents[i] : null;
                     uploaded[i] = (item == null || isDuelItem(item) || isKitEditor(item)) ? null : item.clone();
                 }
-                boolean any=false; for(ItemStack it:uploaded) if(it!=null && it.getType()!=Material.AIR) { any=true; break; }
-                if(!any) { tell(p,"&cUpload cancelled: your inventory has no kit items. Put the kit in your inventory first."); return true; }
                 getConfig().set("kits."+kitName+".contents", uploaded);
-                ItemStack[] armorUpload=p.getInventory().getArmorContents().clone();
-                getConfig().set("kits."+kitName+".armor", armorUpload);
+                getConfig().set("kits."+kitName+".armor", p.getInventory().getArmorContents());
                 getConfig().set("kits."+kitName+".offhand", p.getInventory().getItemInOffHand());
                 saveConfig(); reloadConfig(); tell(p,"&aUploaded server-default kit &f"+kitName+"&a."); return true;
             }
@@ -1044,18 +985,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private Location arenaCenter(String id) { String path="arenas."+id; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z")); }
     private Location arenaSpawn(String id,int n) { String path="arenas."+id+".spawn"+n; if(!getConfig().contains(path+".world"))return null; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z"),(float)getConfig().getDouble(path+".yaw"),(float)getConfig().getDouble(path+".pitch")); }
     private void startDuel(Player first,Player second) {
-        String arena=null; boolean anyConfigured=false;
-        for(String id:arenaKeys()) if(arenaSpawn(id,1)!=null&&arenaSpawn(id,2)!=null) { anyConfigured=true; if(!reservedArenaIds.contains(id)) { arena=id; break; } }
-        if(arena==null) {
-            if(anyConfigured && first.isOnline() && second.isOnline()) {
-                tell(first,"&eWaiting for a free arena; you'll be teleported after the current duel finishes and cleanup completes.");
-                tell(second,"&eWaiting for a free arena; you'll be teleported after the current duel finishes and cleanup completes.");
-                Bukkit.getScheduler().runTaskLater(this, () -> { if(first.isOnline() && second.isOnline() && !activeDuels.containsKey(first.getUniqueId()) && !activeDuels.containsKey(second.getUniqueId())) startDuel(first,second); }, 40L);
-            } else { tell(first,"&cNo usable arena: every arena needs spawn 1 and spawn 2."); tell(second,"&cDuel cancelled: no arena has both spawns configured."); }
-            return;
-        }
-        final String selectedArena = arena; reservedArenaIds.add(selectedArena);
-        if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { reservedArenaIds.remove(selectedArena); tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return; }
+        String arena=null; for(String id:arenaKeys()) if(arenaSpawn(id,1)!=null&&arenaSpawn(id,2)!=null) { arena=id; break; }
+        if(arena==null) { tell(first,"&cNo usable arena: every arena needs spawn 1 and spawn 2. Configure another arena first.");tell(second,"&cDuel cancelled: no arena has both spawns configured.");return; }
+        final String selectedArena = arena;
+        if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return; }
         activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),Integer.parseInt(selectedArena));duelArenaByPlayer.put(second.getUniqueId(),Integer.parseInt(selectedArena)); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
         first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
         tell(first,"&aDuel accepted: &f"+second.getName()+"&a!"); tell(second,"&aDuel accepted: &f"+first.getName()+"&a!");
@@ -1064,7 +997,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         first.sendTitle(c("&d&lDUEL READY"),c("&7Teleporting in 3 seconds..."),0,60,0); second.sendTitle(c("&d&lDUEL READY"),c("&7Teleporting in 3 seconds..."),0,60,0);
         for(int sec=3;sec>=1;sec--){final int n=sec; Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0);first.playSound(first.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);second.playSound(second.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);}},(4-sec)*20L);}
         Bukkit.getScheduler().runTaskLater(this,()->{
-            if(!activeDuels.containsKey(first.getUniqueId())||!activeDuels.containsKey(second.getUniqueId())||!first.isOnline()||!second.isOnline()){ reservedArenaIds.remove(selectedArena); return; }
+            if(!activeDuels.containsKey(first.getUniqueId())||!activeDuels.containsKey(second.getUniqueId())||!first.isOnline()||!second.isOnline())return;
             first.teleport(arenaSpawn(selectedArena,1)); second.teleport(arenaSpawn(selectedArena,2));
             // Duel combat tagging begins on arena entry and remains until the duel ends.
             arenaCombat.add(first.getUniqueId());
@@ -1102,7 +1035,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Integer arenaId = duelArenaByPlayer.get(winner.getUniqueId());
         if (arenaId == null) arenaId = duelArenaByPlayer.get(loser.getUniqueId());
         final String finishedArenaId = arenaId == null ? null : String.valueOf(arenaId);
-        ensurePlayer(winner); ensurePlayer(loser); stat(winner.getUniqueId(), "duel_wins", 1); stat(loser.getUniqueId(), "duel_losses", 1);
         activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId());arenaCombat.remove(winner.getUniqueId());arenaCombat.remove(loser.getUniqueId());combatUntil.remove(winner.getUniqueId());combatUntil.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
         winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
         if (winner.isOnline()) winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
@@ -1145,10 +1077,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
             // Once both players have returned, remove any dropped duel items/projectiles from the arena.
             if (finishedArenaId != null) {
-                Bukkit.getScheduler().runTaskLater(this, () -> {
-                    cleanArenaEntities(finishedArenaId);
-                    reservedArenaIds.remove(finishedArenaId);
-                }, 2L);
+                Bukkit.getScheduler().runTaskLater(this, () -> cleanArenaEntities(finishedArenaId), 1L);
             }
         }, 100L);
     }
@@ -1287,13 +1216,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (sword == null) sword = namedItem(Material.IRON_SWORD, DUEL_ITEM_NAME, List.of("§7Right or left click to choose a kit"));
         p.getInventory().setItem(0, sword);
     }
-    @EventHandler public void onDuelNpcInteract(PlayerInteractEntityEvent e) {
-        Entity clicked=e.getRightClicked(); String path="duel-npcs."+clicked.getUniqueId();
-        if(!getConfig().contains(path+".kit")) return;
-        e.setCancelled(true); Player player=e.getPlayer(); String kit=getConfig().getString(path+".kit","sword");
-        player.playSound(player.getLocation(),org.bukkit.Sound.UI_BUTTON_CLICK,0.8f,1.5f); queueForDuel(player,kit);
-    }
-
     @EventHandler public void onDuelItemUse(PlayerInteractEvent e) {
         if (isDuelItem(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); return; }
         if (isKitEditor(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"editor",null); }
