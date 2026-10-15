@@ -523,18 +523,45 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
         if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(false); return; }
         if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); return; }
+        Location blockLoc = e.getBlock().getLocation();
         for (String key : arenaKeys()) {
             Location center = arenaCenter(key);
-            if (center != null && center.getWorld().equals(e.getBlock().getWorld()) && center.distanceSquared(e.getBlock().getLocation()) <= 10000.0) {
+            if (center != null && center.getWorld().equals(blockLoc.getWorld()) && center.distanceSquared(blockLoc) <= 10000.0) {
                 e.setCancelled(true);
                 return;
             }
+        }
+        ConfigurationSection cpvps = getConfig().getConfigurationSection("cpvparenas");
+        if (cpvps != null) for (String key : cpvps.getKeys(false)) {
+            String path = "cpvparenas." + key;
+            World world = Bukkit.getWorld(getConfig().getString(path + ".world", ""));
+            if (world == null || !world.equals(blockLoc.getWorld())) continue;
+            double dx = blockLoc.getX() - getConfig().getDouble(path + ".x");
+            double dz = blockLoc.getZ() - getConfig().getDouble(path + ".z");
+            if (dx * dx + dz * dz > 200.0 * 200.0) continue;
+            Material type = e.getBlock().getType();
+            boolean allowed = blockLoc.getBlockY() < getConfig().getInt(path + ".y-level")
+                    && (type == Material.GRASS_BLOCK || type == Material.DIRT || type == Material.COARSE_DIRT
+                    || type == Material.ROOTED_DIRT || type == Material.STONE || type == Material.DEEPSLATE
+                    || type == Material.COBBLED_DEEPSLATE || type == Material.RESPAWN_ANCHOR
+                    || type == Material.OBSIDIAN || type == Material.GLOWSTONE);
+            e.setCancelled(!allowed);
+            return;
         }
     }
     @EventHandler(priority = EventPriority.HIGHEST) public void protectSpawnBlockPlace(BlockPlaceEvent e) {
         // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
         if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(false); return; }
         Location location = e.getBlock().getLocation();
+        ConfigurationSection cpvps = getConfig().getConfigurationSection("cpvparenas");
+        if (cpvps != null) for (String key : cpvps.getKeys(false)) {
+            String path = "cpvparenas." + key;
+            World world = Bukkit.getWorld(getConfig().getString(path + ".world", ""));
+            if (world == null || !world.equals(location.getWorld())) continue;
+            double dx = location.getX() - getConfig().getDouble(path + ".x");
+            double dz = location.getZ() - getConfig().getDouble(path + ".z");
+            if (dx * dx + dz * dz <= 200.0 * 200.0) return;
+        }
         if (inSpawnProtection(location)) { e.setCancelled(true); tell(e.getPlayer(), "&cSpawn protection: building is disabled here."); return; }
         for (String key : arenaKeys()) {
             Location center = arenaCenter(key);
@@ -841,6 +868,27 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             int id,which;try{id=Integer.parseInt(a[2]);which=Integer.parseInt(a[3]);}catch(NumberFormatException ex){tell(s,"&cArena and spawn numbers must be integers.");return true;}
             if(which<1||which>2||!getConfig().contains("arenas."+id)){tell(p,"&cArena does not exist or spawn must be 1 or 2.");return true;}
             Location l=p.getLocation();String path="arenas."+id+".spawn"+which;getConfig().set(path+".world",l.getWorld().getName());getConfig().set(path+".x",l.getX());getConfig().set(path+".y",l.getY());getConfig().set(path+".z",l.getZ());getConfig().set(path+".yaw",l.getYaw());getConfig().set(path+".pitch",l.getPitch());saveConfig();tell(p,"&aSaved arena "+id+" spawn "+which+".");return true;
+        }
+        if(n.equals("cpvparena")) {
+            if (!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
+            if (!isDev(p)) { tell(p, "&cOnly the owner can manage CPvP arenas."); return true; }
+            if (a.length < 2 || !a[0].equalsIgnoreCase("add")) {
+                tell(p, "&cUsage: /cpvparena add <y-level>");
+                return true;
+            }
+            int yLevel;
+            try { yLevel = Integer.parseInt(a[1]); }
+            catch (NumberFormatException ex) { tell(p, "&cY-level must be a number."); return true; }
+            String id = "cpvparena-" + p.getWorld().getName() + "-" + p.getLocation().getBlockX() + "-" + p.getLocation().getBlockZ();
+            String path = "cpvparenas." + id;
+            getConfig().set(path + ".world", p.getWorld().getName());
+            getConfig().set(path + ".x", p.getLocation().getX());
+            getConfig().set(path + ".z", p.getLocation().getZ());
+            getConfig().set(path + ".y-level", yLevel);
+            getConfig().set(path + ".radius", 200);
+            saveConfig();
+            tell(p, "&aCPvP mining region added: 200-block radius; permitted mining below Y " + yLevel + ".");
+            return true;
         }
         if(n.equals("setspawn")) {
             if(!(s instanceof Player p)) {tell(s,"&cPlayers only.");return true;} if(!isDev(p)){tell(s,"&cNo permission.");return true;}
@@ -1191,8 +1239,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         for(int i=0;i<36;i++){ItemStack it=inv.getItem(i);contents[i]=it==null||it.getType()==Material.AIR?null:it.clone();}
         ItemStack[] armor=new ItemStack[4]; for(int i=0;i<4;i++){ItemStack it=inv.getItem(45+i);armor[i]=it==null?null:it.clone();}
         ItemStack offhand=inv.getItem(49);
-        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".contents",contents);
-        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".armor",armor);
+        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".contents", Arrays.asList(contents));
+        getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".armor", Arrays.asList(armor));
         getConfig().set("player-kits."+p.getUniqueId()+"."+kit+".offhand",offhand==null||offhand.getType()==Material.AIR?null:offhand.clone()); saveConfig();
         p.closeInventory(); tell(p,"&aSaved your personal version of &f"+prettyKitName(kit)+"&a.");
     }
@@ -1287,7 +1335,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(e.getSlot()==51) { e.setCancelled(true); saveEditedKit(p,e.getView().getTopInventory()); return; }
             if(e.getSlot()==53) { e.setCancelled(true); resetEditedKit(p); return; }
             int slot = e.getSlot();
-            if ((slot >= 36 && slot <= 44) || slot == 50 || slot == 52 || slot >= 54) { e.setCancelled(true); return; }
+            // Never allow shift-clicking from player inventory into the editor or
+            // taking filler/control items. Normal clicks within editable slots remain allowed.
+            if (e.getClickedInventory() != e.getView().getTopInventory()
+                    || (slot >= 36 && slot <= 44) || slot == 50 || slot == 52 || slot >= 54
+                    || e.getAction() == org.bukkit.event.inventory.InventoryAction.MOVE_TO_OTHER_INVENTORY
+                    || e.getAction() == org.bukkit.event.inventory.InventoryAction.COLLECT_TO_CURSOR) {
+                e.setCancelled(true);
+                return;
+            }
             return;
         }
         if (!title.contains("Select a Kit") && !title.contains("Kit Editor") && !title.contains("Duel Settings")) return;
