@@ -628,32 +628,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (isTotem(loser.getInventory().getItemInMainHand())
                 || isTotem(loser.getInventory().getItemInOffHand())) return;
         Player winner = Bukkit.getPlayer(otherId);
+        if (winner == null || !winner.isOnline()) return;
+        // Intercept lethal damage so the round can be counted without ending the whole duel.
+        // The shared round handler decides whether this is the match point or another round.
         e.setCancelled(true);
-        loser.setHealth(Math.max(1.0, Math.min(loser.getHealth(), 1.0)));
-        if (winner != null && winner.isOnline()) {
-            finishDuel(winner, loser);
-        } else {
-            activeDuels.remove(loser.getUniqueId());
-            pendingDuelLosers.add(loser.getUniqueId());
-            loser.setGameMode(GameMode.SPECTATOR);
-            Bukkit.getScheduler().runTaskLater(this, () -> {
-                if (!loser.isOnline()) return;
-                String worldName = getConfig().getString("spawn.world", "");
-                World world = Bukkit.getWorld(worldName);
-                if (world != null) loser.teleport(new Location(world,
-                    getConfig().getDouble("spawn.x", 0.5), getConfig().getDouble("spawn.y", 80),
-                    getConfig().getDouble("spawn.z", 0.5),
-                    (float) getConfig().getDouble("spawn.yaw", 0),
-                    (float) getConfig().getDouble("spawn.pitch", 0)));
-                loser.setGameMode(GameMode.SURVIVAL);
-                loser.getInventory().clear();
-                loser.getInventory().setArmorContents(null);
-                loser.getInventory().setItemInOffHand(null);
-                pendingDuelLosers.remove(loser.getUniqueId());
-                giveDuelItem(loser);
-                giveKitEditor(loser);
-            }, 100L);
-        }
+        loser.setHealth(1.0);
+        handleDuelRoundWin(winner, loser);
     }
 
     private boolean isTotem(ItemStack item) {
@@ -1118,7 +1098,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     private boolean startDuel(Player first,Player second) {
         if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return false; }
+        // The challenger/first player is authoritative for direct /duel requests.
+        // Copy their selected kit and round count to BOTH participants so stale selections
+        // left on the target from an earlier duel cannot override the challenge settings.
         String kit = normalizeKitName(duelChosenKits.getOrDefault(first.getUniqueId(), duelChosenKits.getOrDefault(second.getUniqueId(), "sword")));
+        duelChosenKits.put(first.getUniqueId(), kit);
+        duelChosenKits.put(second.getUniqueId(), kit);
+        int configuredRounds = Math.max(1, Math.min(99, duelRounds.getOrDefault(first.getUniqueId(), duelRounds.getOrDefault(second.getUniqueId(), 1))));
+        duelRounds.put(first.getUniqueId(), configuredRounds);
+        duelRounds.put(second.getUniqueId(), configuredRounds);
         boolean vanilla = kit.equals("vanilla");
         String arena = null;
         for (String id : arenaKeys()) {
@@ -1129,9 +1117,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (arena == null) return false;
         final String selectedArena = arena;
         duelRoundWins.put(first.getUniqueId(), 0); duelRoundWins.put(second.getUniqueId(), 0);
-        int configuredRounds = Math.max(1, duelRounds.getOrDefault(first.getUniqueId(), duelRounds.getOrDefault(second.getUniqueId(), 1)));
-        duelRounds.put(first.getUniqueId(), configuredRounds);
-        duelRounds.put(second.getUniqueId(), configuredRounds);
         occupiedDuelArenas.add(selectedArena);
         activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),selectedArena);duelArenaByPlayer.put(second.getUniqueId(),selectedArena); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
         first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
@@ -1506,37 +1491,67 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Player p=e.getPlayer(); Bukkit.getScheduler().runTask(this,()->{if(pendingDuelLosers.contains(p.getUniqueId()))p.setGameMode(GameMode.SPECTATOR);else {giveDuelItem(p);giveKitEditor(p);}}); }
     @EventHandler public void onDuelDeath(PlayerDeathEvent e) {
         e.getDrops().removeIf(this::isDuelItem);
-        Player loser = e.getEntity(); UUID winnerId = activeDuels.get(loser.getUniqueId());
+        Player loser = e.getEntity();
+        UUID winnerId = activeDuels.get(loser.getUniqueId());
         if (winnerId == null) return;
-        e.setKeepInventory(true); e.getDrops().clear(); e.setDroppedExp(0);
+        e.setKeepInventory(true);
+        e.getDrops().clear();
+        e.setDroppedExp(0);
         Player winner = Bukkit.getPlayer(winnerId);
-        if (winner == null || !winner.isOnline()) { Bukkit.getScheduler().runTask(this, () -> finishDuel(winner, loser)); return; }
+        pendingDuelLosers.add(loser.getUniqueId());
+        Bukkit.getScheduler().runTask(this, () -> handleDuelRoundWin(winner, loser));
+    }
+
+    private void handleDuelRoundWin(Player winner, Player loser) {
+        if (winner == null || loser == null || !winner.isOnline() || !loser.isOnline()) return;
+        UUID winnerId = winner.getUniqueId();
+        UUID loserId = loser.getUniqueId();
+        if (!activeDuels.containsKey(winnerId) || !activeDuels.containsKey(loserId)) return;
+
         int winnerScore = duelRoundWins.merge(winnerId, 1, Integer::sum);
-        int loserScore = duelRoundWins.getOrDefault(loser.getUniqueId(), 0);
-        int rounds = Math.max(1, duelRounds.getOrDefault(winnerId, duelRounds.getOrDefault(loser.getUniqueId(), 1)));
+        int loserScore = duelRoundWins.getOrDefault(loserId, 0);
+        int rounds = Math.max(1, duelRounds.getOrDefault(winnerId, duelRounds.getOrDefault(loserId, 1)));
         int winsNeeded = rounds / 2 + 1;
         tell(winner, "&aRound won! Score: &f" + winnerScore + "-" + loserScore);
         tell(loser, "&cRound lost. Score: &f" + loserScore + "-" + winnerScore);
-        updateAzurTabAndScoreboard(winner); updateAzurTabAndScoreboard(loser);
-        pendingDuelLosers.add(loser.getUniqueId());
-        if (winnerScore >= winsNeeded) Bukkit.getScheduler().runTask(this, () -> finishDuel(winner, loser));
-        else Bukkit.getScheduler().runTask(this, () -> {
+        updateAzurTabAndScoreboard(winner);
+        updateAzurTabAndScoreboard(loser);
+
+        if (winnerScore >= winsNeeded) {
+            Bukkit.getScheduler().runTask(this, () -> finishDuel(winner, loser));
+            return;
+        }
+
+        pendingDuelLosers.add(loserId);
+        loser.setGameMode(GameMode.SPECTATOR);
+        winner.sendTitle(c("&a&lROUND WON"), c("&7Next round..."), 0,  40, 10);
+        loser.sendTitle(c("&c&lROUND LOST"), c("&7Next round..."), 0, 40, 10);
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!winner.isOnline() || !loser.isOnline() || !activeDuels.containsKey(winnerId) || !activeDuels.containsKey(loserId)) return;
             String arenaId = duelArenaByPlayer.get(winnerId);
             Location spawn1 = arenaId == null ? null : arenaSpawn(arenaId, 1);
             Location spawn2 = arenaId == null ? null : arenaSpawn(arenaId, 2);
-            winner.sendTitle(c("&a&lROUND WON"), c("&7Next round..."), 0, 40, 10);
-            loser.sendTitle(c("&c&lROUND LOST"), c("&7Next round..."), 0, 40, 10);
-            // PlayerRespawnEvent returns the defeated player to their configured side; reset both players after respawn.
-            Bukkit.getScheduler().runTaskLater(this, () -> {
-                if (!winner.isOnline() || !loser.isOnline() || !activeDuels.containsKey(winnerId)) return;
-                if (spawn1 != null && spawn2 != null) { winner.teleport(spawn1); loser.teleport(spawn2); }
-                for (Player participant : List.of(winner, loser)) {
-                    participant.setGameMode(GameMode.SURVIVAL); participant.getInventory().clear(); participant.getInventory().setArmorContents(new ItemStack[4]); participant.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
-                    giveDuelKit(participant, duelChosenKits.getOrDefault(participant.getUniqueId(), "sword")); participant.setHealth(participant.getMaxHealth()); participant.setFoodLevel(20); participant.setSaturation(0); participant.setFireTicks(0); participant.setFallDistance(0); pendingDuelLosers.remove(participant.getUniqueId()); updateAzurTabAndScoreboard(participant);
-                }
-                winner.sendTitle(c("&a&lFIGHT!"), c("&7Next round"), 0, 30, 10); loser.sendTitle(c("&a&lFIGHT!"), c("&7Next round"), 0, 30, 10);
-            }, 40L);
-        });
+            if (spawn1 != null && spawn2 != null) {
+                winner.teleport(spawn1);
+                loser.teleport(spawn2);
+            }
+            for (Player participant : List.of(winner, loser)) {
+                participant.setGameMode(GameMode.SURVIVAL);
+                participant.getInventory().clear();
+                participant.getInventory().setArmorContents(new ItemStack[4]);
+                participant.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
+                giveDuelKit(participant, duelChosenKits.getOrDefault(winnerId, "sword"));
+                participant.setHealth(participant.getMaxHealth());
+                participant.setFoodLevel(20);
+                participant.setSaturation(0.0f);
+                participant.setFireTicks(0);
+                participant.setFallDistance(0);
+                pendingDuelLosers.remove(participant.getUniqueId());
+                updateAzurTabAndScoreboard(participant);
+            }
+            winner.sendTitle(c("&a&lFIGHT!"), c("&7Next round"), 0, 30, 10);
+            loser.sendTitle(c("&a&lFIGHT!"), c("&7Next round"), 0, 30, 10);
+        }, 40L);
     }
 
     @Override public List<String> onTabComplete(CommandSender s, Command cmd, String alias, String[] args) {
