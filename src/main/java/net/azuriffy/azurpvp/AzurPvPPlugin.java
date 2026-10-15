@@ -24,6 +24,7 @@ import org.bukkit.entity.ExperienceOrb;
 import org.bukkit.entity.Firework;
 import org.bukkit.event.*;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.entity.EntityResurrectEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.block.BlockBreakEvent;
@@ -575,6 +576,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (!(e.getEntity() instanceof Player loser)) return;
         UUID otherId = activeDuels.get(loser.getUniqueId());
         if (otherId == null || e.getFinalDamage() < loser.getHealth()) return;
+
+        // Let vanilla handle a totem only when one is actually held in either hand.
+        // If one is held, the resurrection event below chains the next inventory totem.
+        if (isTotem(loser.getInventory().getItemInMainHand())
+                || isTotem(loser.getInventory().getItemInOffHand())) return;
         Player winner = Bukkit.getPlayer(otherId);
         e.setCancelled(true);
         loser.setHealth(Math.max(1.0, Math.min(loser.getHealth(), 1.0)));
@@ -602,6 +608,41 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 giveKitEditor(loser);
             }, 100L);
         }
+    }
+
+    private boolean isTotem(ItemStack item) {
+        return item != null && item.getType() == Material.TOTEM_OF_UNDYING && item.getAmount() > 0;
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void chainDuelTotems(EntityResurrectEvent e) {
+        if (!(e.getEntity() instanceof Player player) || !activeDuels.containsKey(player.getUniqueId())) return;
+        // Vanilla consumes the held totem. Refill that same hand from inventory so
+        // subsequent lethal hits can trigger another normal resurrection.
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (!player.isOnline() || !activeDuels.containsKey(player.getUniqueId())) return;
+            ItemStack main = player.getInventory().getItemInMainHand();
+            ItemStack off = player.getInventory().getItemInOffHand();
+            if (isTotem(main) || isTotem(off)) return;
+            for (int slot = 0; slot < 36; slot++) {
+                ItemStack item = player.getInventory().getItem(slot);
+                if (isTotem(item)) {
+                    ItemStack held = item.clone();
+                    held.setAmount(1);
+                    if (e.getEntity() instanceof Player) {
+                        // Prefer the hand that held the totem just consumed.
+                        if (player.getInventory().getItemInOffHand().getType() == Material.AIR) {
+                            player.getInventory().setItemInOffHand(held);
+                        } else {
+                            player.getInventory().setItemInMainHand(held);
+                        }
+                    }
+                    if (item.getAmount() <= 1) player.getInventory().setItem(slot, null);
+                    else item.setAmount(item.getAmount() - 1);
+                    break;
+                }
+            }
+        });
     }
 
     @EventHandler public void onDeath(PlayerDeathEvent e) {
