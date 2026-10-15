@@ -243,12 +243,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     private void updateAzurTabAndScoreboard(Player p) {
-        p.setPlayerListHeaderFooter(
+        if (playerSetting(p, "tab_info", true)) p.setPlayerListHeaderFooter(
             c("\n&5&lAZUR&d&lPVP\n&7Minecraft 1.21.11+\n"),
             c("\n&7Players: &d" + Bukkit.getOnlinePlayers().size() + "\n"
                 + "&7Ping: &a" + p.getPing() + "ms\n"
                 + "&d/discord &8| &d/store &8| &d/website\n")
-        );
+        ); else p.setPlayerListHeaderFooter("", "");
         Scoreboard board = p.getScoreboard();
         if (board == Bukkit.getScoreboardManager().getMainScoreboard()) {
             board = Bukkit.getScoreboardManager().getNewScoreboard();
@@ -257,6 +257,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             board = p.getScoreboard();
         }
         org.bukkit.scoreboard.Objective objective = board.getObjective("azurpvp");
+        if (!playerSetting(p, "scoreboard", true)) { if (objective != null) objective.setDisplaySlot(null); p.setScoreboard(board); return; }
         if (objective == null) objective = board.registerNewObjective("azurpvp", "dummy", c("&5&lAZUR&d&lPVP"));
         objective.setDisplayName(c("&5&lAZUR&d&lPVP"));
         objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
@@ -977,7 +978,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("whois")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}tell(s,"&d"+t.getName()+" &7UUID: &f"+t.getUniqueId()+" &7Ping: &f"+t.getPing()+"ms &7Role: &f"+roleOf(t.getUniqueId()));return true; }
         if(n.equals("announce")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Bukkit.broadcastMessage(prefix()+c(String.join(" ",a)));return true; }
         if(n.equals("maintenance")) { if(!isDev(s)){tell(s,"&cOwner role required.");return true;} boolean enabled=!getConfig().getBoolean("maintenance.enabled",false);getConfig().set("maintenance.enabled",enabled);saveConfig(); if(enabled) for(Player online:Bukkit.getOnlinePlayers()) if(!isStaff(online)) online.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled.")); tell(s,"&dMaintenance mode "+(enabled?"enabled":"disabled")+".");return true; }
-        if(n.equals("settings")) { if(!(s instanceof Player p))return true;tell(p,"&dUse config.yml to configure personal/server feature toggles in this build.");return true; }
+        if(n.equals("settings")) { if(!(s instanceof Player p))return true;openSettings(p);return true; }
         if(n.equals("playtime")) { if(!(s instanceof Player p))return true;long seconds=getStat(p.getUniqueId(),"playtime_seconds");tell(p,"&dPlaytime: &f"+(seconds/3600)+"h "+((seconds%3600)/60)+"m");return true; }
         if(n.equals("cps")) { tell(s,"&7CPS monitoring is not active in this build; use a dedicated anti-cheat for enforcement.");return true; }
         if(n.equals("rules")){tell(s,getConfig().getString("messages.rules","&dBe respectful."));return true;}
@@ -1003,12 +1004,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (playerKits.containsKey(normalizedKit)) {
             playerKits.remove(normalizedKit);
             if (playerKits.isEmpty()) duelQueue.remove(playerId);
-            player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.65f);
+            if (playerSetting(player, "queue_sounds", false)) player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.65f);
             tell(player, "&eRemoved &f" + prettyKitName(normalizedKit) + " &efrom your queue.");
             return;
         }
         playerKits.put(normalizedKit, System.currentTimeMillis());
-        player.playSound(player.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.8f, 1.5f);
+        if (playerSetting(player, "queue_sounds", false)) player.playSound(player.getLocation(), org.bukkit.Sound.UI_BUTTON_CLICK, 0.8f, 1.5f);
         tell(player, "&dQueued for &f" + prettyKitName(normalizedKit) + "&d. Click the same kit again to leave that queue.");
 
         Player opponent = null;
@@ -1121,10 +1122,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),selectedArena);duelArenaByPlayer.put(second.getUniqueId(),selectedArena); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
         first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
         tell(first,"&aDuel accepted: &f"+second.getName()+"&a!"); tell(second,"&aDuel accepted: &f"+first.getName()+"&a!");
-        first.playSound(first.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
-        second.playSound(second.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+        if (playerSetting(first, "duel_sounds", true)) first.playSound(first.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+        if (playerSetting(second, "duel_sounds", true)) second.playSound(second.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
         first.sendTitle(c("&d&lDUEL READY"),c("&7Teleporting in 3 seconds..."),0,60,0); second.sendTitle(c("&d&lDUEL READY"),c("&7Teleporting in 3 seconds..."),0,60,0);
-        for(int sec=3;sec>=1;sec--){final int n=sec; Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0);first.playSound(first.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);second.playSound(second.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);}},(4-sec)*20L);}
+        for(int sec=3;sec>=1;sec--){final int n=sec; Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){if(playerSetting(first,"duel_titles",true)) first.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0); if(playerSetting(second,"duel_titles",true)) second.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0); if(playerSetting(first,"duel_sounds",true)) first.playSound(first.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f); if(playerSetting(second,"duel_sounds",true)) second.playSound(second.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);}},(4-sec)*20L);}
         Bukkit.getScheduler().runTaskLater(this,()->{
             if(!activeDuels.containsKey(first.getUniqueId())||!activeDuels.containsKey(second.getUniqueId())||!first.isOnline()||!second.isOnline())return;
             first.teleport(arenaSpawn(selectedArena,1)); second.teleport(arenaSpawn(selectedArena,2));
@@ -1168,8 +1169,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         final String arenaToClean = finishedArenaId;
         activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId()); duelRoundWins.remove(winner.getUniqueId()); duelRoundWins.remove(loser.getUniqueId());arenaCombat.remove(winner.getUniqueId());arenaCombat.remove(loser.getUniqueId());combatUntil.remove(winner.getUniqueId());combatUntil.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
         winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
-        if (winner.isOnline()) winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
-        if (loser.isOnline()) loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
+        if (winner.isOnline() && playerSetting(winner, "duel_sounds", true)) winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
+        if (loser.isOnline() && playerSetting(loser, "duel_sounds", true)) loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
         pendingDuelLosers.add(loser.getUniqueId());if(loser.isOnline()&&!loser.isDead())loser.setGameMode(GameMode.SPECTATOR);
         Bukkit.getScheduler().runTaskLater(this, () -> {
             String spawnWorldName = getConfig().getString("spawn.world", "");
@@ -1337,6 +1338,51 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         p.getInventory().setItem(7,book);
     }
     private boolean isKitEditor(ItemStack item) { return item!=null && item.getType()==Material.BOOK && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&d&lKit editor").equals(item.getItemMeta().getDisplayName()); }
+    private ItemStack settingsItem() { return namedItem(Material.ANVIL, "&d&lSettings", List.of("&7Personal PvP settings", "&7Only changes your own preferences")); }
+    private boolean isSettingsItem(ItemStack item) { return item != null && item.getType() == Material.ANVIL && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&d&lSettings").equals(item.getItemMeta().getDisplayName()); }
+    private boolean playerSetting(Player p, String key, boolean fallback) { return getConfig().getBoolean("player-settings." + p.getUniqueId() + "." + key, fallback); }
+    private void setPlayerSetting(Player p, String key, boolean value) { getConfig().set("player-settings." + p.getUniqueId() + "." + key, value); saveConfig(); }
+    private void giveSettingsItem(Player p) { p.getInventory().setItem(8, settingsItem()); }
+    private void openSettings(Player p) {
+        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dSettings"));
+        inv.setItem(10, namedItem(Material.IRON_SWORD, "&d&lCombat", List.of("&7Duel and PvP preferences")));
+        inv.setItem(12, namedItem(Material.PAINTING, "&d&lInterface", List.of("&7Scoreboard and visual options")));
+        inv.setItem(14, namedItem(Material.NOTE_BLOCK, "&d&lSounds", List.of("&7Personal sound preferences")));
+        inv.setItem(16, namedItem(Material.FEATHER, "&d&lGameplay", List.of("&7Personal gameplay options")));
+        inv.setItem(22, namedItem(Material.BARRIER, "&cClose", List.of("&7Close settings")));
+        p.openInventory(inv);
+    }
+    private void openSettingsCategory(Player p, String category) {
+        String title = switch (category) { case "combat" -> "Combat"; case "interface" -> "Interface"; case "sounds" -> "Sounds"; default -> "Gameplay"; };
+        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &d" + title));
+        if (category.equals("interface")) {
+            inv.setItem(11, namedItem(playerSetting(p, "scoreboard", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dScoreboard: " + (playerSetting(p, "scoreboard", true) ? "&aON" : "&cOFF"), List.of("&7Toggle your personal sidebar")));
+            inv.setItem(15, namedItem(playerSetting(p, "tab_info", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dTab info: " + (playerSetting(p, "tab_info", true) ? "&aON" : "&cOFF"), List.of("&7Toggle the custom tab header/footer")));
+        } else if (category.equals("sounds")) {
+            inv.setItem(11, namedItem(playerSetting(p, "duel_sounds", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dDuel sounds: " + (playerSetting(p, "duel_sounds", true) ? "&aON" : "&cOFF"), List.of("&7Countdown and duel result sounds")));
+            inv.setItem(15, namedItem(playerSetting(p, "queue_sounds", false) ? Material.LIME_DYE : Material.GRAY_DYE, "&dQueue sounds: " + (playerSetting(p, "queue_sounds", false) ? "&aON" : "&cOFF"), List.of("&7Queue confirmation sounds")));
+        } else if (category.equals("combat")) {
+            inv.setItem(11, namedItem(playerSetting(p, "duel_titles", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dDuel titles: " + (playerSetting(p, "duel_titles", true) ? "&aON" : "&cOFF"), List.of("&7Toggle countdown and round titles")));
+            inv.setItem(15, namedItem(playerSetting(p, "round_messages", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dRound messages: " + (playerSetting(p, "round_messages", true) ? "&aON" : "&cOFF"), List.of("&7Toggle duel round messages")));
+        } else {
+            inv.setItem(13, namedItem(playerSetting(p, "auto_requeue", false) ? Material.LIME_DYE : Material.GRAY_DYE, "&dAuto re-queue: " + (playerSetting(p, "auto_requeue", false) ? "&aON" : "&cOFF"), List.of("&7Preference reserved for future queue flow")));
+        }
+        inv.setItem(22, namedItem(Material.ARROW, "&aBack", List.of("&7Return to settings")));
+        p.openInventory(inv);
+    }
+    private void togglePlayerSetting(Player p, String key, boolean fallback) {
+        boolean value = !playerSetting(p, key, fallback);
+        setPlayerSetting(p, key, value);
+        tell(p, "&d" + key.replace('_', ' ') + " set to " + (value ? "&aON" : "&cOFF") + "&d.");
+        if (key.equals("scoreboard")) {
+            if (value) updateAzurTabAndScoreboard(p);
+            else { Scoreboard board = p.getScoreboard(); org.bukkit.scoreboard.Objective objective = board.getObjective("azurpvp"); if (objective != null) objective.setDisplaySlot(null); }
+        }
+        if (key.equals("tab_info")) {
+            if (value) p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7Minecraft 1.21.11+\n"), c("\n&7Players: &d" + Bukkit.getOnlinePlayers().size() + "\n&7Ping: &a" + p.getPing() + "ms\n&d/discord &8| &d/store &8| &d/website\n"));
+            else p.setPlayerListHeaderFooter("", "");
+        }
+    }
     private boolean isDuelItem(ItemStack item) { return item!=null && item.getType()==Material.IRON_SWORD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && DUEL_ITEM_NAME.equals(item.getItemMeta().getDisplayName()); }
     private void giveDuelItem(Player p) {
         ItemStack sword = null;
@@ -1348,10 +1394,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         p.getInventory().setItem(0, sword);
     }
     @EventHandler public void onDuelItemUse(PlayerInteractEvent e) {
-        if (isDuelItem(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); return; }
-        if (isKitEditor(e.getItem()) && (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK)) { e.setCancelled(true); openKitMenu(e.getPlayer(),"editor",null); }
+        if (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK) {
+            if (isSettingsItem(e.getItem())) { e.setCancelled(true); openSettings(e.getPlayer()); return; }
+            if (isDuelItem(e.getItem())) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); return; }
+            if (isKitEditor(e.getItem())) { e.setCancelled(true); openKitMenu(e.getPlayer(),"editor",null); }
+        }
     }
-    @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()) || isKitEditor(e.getItemDrop().getItemStack()))e.setCancelled(true); }
+    @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()) || isKitEditor(e.getItemDrop().getItemStack()) || isSettingsItem(e.getItemDrop().getItemStack()))e.setCancelled(true); }
     private void openRoundsInputMenu(Player p) {
         Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dSet Rounds"));
         inv.setItem(11, namedItem(Material.PAPER, "&d&lEnter Round Count", List.of("&7Click to type a number in chat", "&7Allowed: 1-99 rounds")));
@@ -1376,9 +1425,25 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @EventHandler public void onDuelInventoryClick(InventoryClickEvent e) {
         if(!(e.getWhoClicked() instanceof Player p))return;
-        if(isDuelItem(e.getCurrentItem()) || isDuelItem(e.getCursor()) || isKitEditor(e.getCurrentItem()) || isKitEditor(e.getCursor())) { e.setCancelled(true); return; }
+        if(isDuelItem(e.getCurrentItem()) || isDuelItem(e.getCursor()) || isKitEditor(e.getCurrentItem()) || isKitEditor(e.getCursor()) || isSettingsItem(e.getCurrentItem()) || isSettingsItem(e.getCursor())) { e.setCancelled(true); return; }
+        if (e.getClick() == org.bukkit.event.inventory.ClickType.NUMBER_KEY && (isSettingsItem(e.getView().getBottomInventory().getItem(e.getHotbarButton())) || isSettingsItem(e.getCurrentItem()))) { e.setCancelled(true); return; }
         String title=ChatColor.stripColor(e.getView().getTitle());
         if(title==null)return;
+        if (title.equals("AzurPvP » Settings")) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            switch (e.getSlot()) { case 10 -> openSettingsCategory(p,"combat"); case 12 -> openSettingsCategory(p,"interface"); case 14 -> openSettingsCategory(p,"sounds"); case 16 -> openSettingsCategory(p,"gameplay"); case 22 -> p.closeInventory(); }
+            return;
+        }
+        if (title.equals("AzurPvP » Combat") || title.equals("AzurPvP » Interface") || title.equals("AzurPvP » Sounds") || title.equals("AzurPvP » Gameplay")) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            String category = title.substring(title.lastIndexOf("»") + 1).trim().toLowerCase(Locale.ROOT);
+            if (e.getSlot()==22) { openSettings(p); return; }
+            if (category.equals("interface")) { if (e.getSlot()==11) togglePlayerSetting(p,"scoreboard",true); else if (e.getSlot()==15) togglePlayerSetting(p,"tab_info",true); }
+            else if (category.equals("sounds")) { if (e.getSlot()==11) togglePlayerSetting(p,"duel_sounds",true); else if (e.getSlot()==15) togglePlayerSetting(p,"queue_sounds",false); }
+            else if (category.equals("combat")) { if (e.getSlot()==11) togglePlayerSetting(p,"duel_titles",true); else if (e.getSlot()==15) togglePlayerSetting(p,"round_messages",true); }
+            else if (category.equals("gameplay") && e.getSlot()==13) togglePlayerSetting(p,"auto_requeue",false);
+            openSettingsCategory(p,category); return;
+        }
         if(title.startsWith("Editing:")) {
             if(e.getClickedInventory()!=e.getView().getTopInventory()) { e.setCancelled(true); return; }
             if(e.getSlot()==51) { e.setCancelled(true); saveEditedKit(p,e.getView().getTopInventory()); return; }
@@ -1487,8 +1552,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         arenaCombat.remove(id);
         combatUntil.remove(id);
     }
-    @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); giveKitEditor(e.getPlayer()); }
-    @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Player p=e.getPlayer(); Bukkit.getScheduler().runTask(this,()->{if(pendingDuelLosers.contains(p.getUniqueId()))p.setGameMode(GameMode.SPECTATOR);else {giveDuelItem(p);giveKitEditor(p);}}); }
+    @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); giveKitEditor(e.getPlayer()); giveSettingsItem(e.getPlayer()); }
+    @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Player p=e.getPlayer(); Bukkit.getScheduler().runTask(this,()->{if(pendingDuelLosers.contains(p.getUniqueId()))p.setGameMode(GameMode.SPECTATOR);else {giveDuelItem(p);giveKitEditor(p);giveSettingsItem(p);}}); }
     @EventHandler public void onDuelDeath(PlayerDeathEvent e) {
         e.getDrops().removeIf(this::isDuelItem);
         Player loser = e.getEntity();
