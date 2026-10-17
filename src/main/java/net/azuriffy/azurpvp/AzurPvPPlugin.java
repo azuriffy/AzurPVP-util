@@ -1421,7 +1421,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     .decorate(TextDecoration.BOLD)
                     .clickEvent(ClickEvent.copyToClipboard(invite))
                     .hoverEvent(HoverEvent.showText(Component.text("Click to copy the Discord invite to your clipboard")));
-                player.sendMessage(prefix().append(Component.text("Discord: ").color(NamedTextColor.LIGHT_PURPLE))
+                player.sendMessage(Component.text(prefix()).append(Component.text("Discord: ").color(NamedTextColor.LIGHT_PURPLE))
                     .append(Component.text(invite).color(NamedTextColor.WHITE)
                         .clickEvent(ClickEvent.openUrl(invite))
                         .hoverEvent(HoverEvent.showText(Component.text("Click to open the Discord invite"))))
@@ -2071,7 +2071,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         for (Entity entity : center.getWorld().getNearbyEntities(center, 100.0, 256.0, 100.0)) {
             if (entity instanceof Item || entity instanceof Arrow || entity instanceof Trident
                     || entity instanceof Snowball || entity instanceof Egg || entity instanceof EnderPearl
-                    || entity instanceof ExperienceOrb || entity instanceof Firework) {
+                    || entity instanceof ExperienceOrb || entity instanceof Firework
+                    || entity instanceof org.bukkit.entity.SpectralArrow
+                    || entity instanceof org.bukkit.entity.ThrownPotion
+                    || entity instanceof org.bukkit.entity.SmallFireball
+                    || entity instanceof org.bukkit.entity.Fireball
+                    || entity instanceof org.bukkit.entity.WitherSkull
+                    || entity instanceof org.bukkit.entity.ShulkerBullet
+                    || entity instanceof org.bukkit.entity.FishingHook
+                    || entity instanceof org.bukkit.entity.AreaEffectCloud) {
                 entity.remove();
             }
         }
@@ -3502,7 +3510,40 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         arenaCombat.remove(id);
         combatUntil.remove(id);
     }
-    @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); giveRankedItem(e.getPlayer()); giveKitEditor(e.getPlayer()); giveSettingsItem(e.getPlayer()); }
+    @EventHandler public void onDuelJoin(PlayerJoinEvent e) {
+        Player p = e.getPlayer();
+        UUID id = p.getUniqueId();
+        // A player may disconnect during the victory/defeat delay. Never let a duel kit
+        // or spectator state survive that disconnect and return to the lobby.
+        if (pendingDuelLosers.remove(id) || !p.getGameMode().equals(GameMode.SURVIVAL)) {
+            p.getInventory().clear();
+            p.getInventory().setArmorContents(new ItemStack[4]);
+            p.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
+            p.setFireTicks(0);
+            p.setFallDistance(0);
+            p.setGameMode(GameMode.SURVIVAL);
+            p.setHealth(p.getMaxHealth());
+            p.setFoodLevel(20);
+            p.setSaturation(20.0f);
+            String spawnWorldName = getConfig().getString("spawn.world", "");
+            World spawnWorld = Bukkit.getWorld(spawnWorldName);
+            if (spawnWorld != null) {
+                Location spawnLocation = new Location(spawnWorld,
+                    getConfig().getDouble("spawn.x", 0.5),
+                    getConfig().getDouble("spawn.y", 80.0),
+                    getConfig().getDouble("spawn.z", 0.5),
+                    (float) getConfig().getDouble("spawn.yaw", 0.0),
+                    (float) getConfig().getDouble("spawn.pitch", 0.0));
+                Bukkit.getScheduler().runTask(this, () -> {
+                    if (p.isOnline()) p.teleport(spawnLocation);
+                });
+            }
+        }
+        giveDuelItem(p);
+        giveRankedItem(p);
+        giveKitEditor(p);
+        giveSettingsItem(p);
+    }
     @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Player p=e.getPlayer(); Bukkit.getScheduler().runTask(this,()->{if(pendingDuelLosers.contains(p.getUniqueId()))p.setGameMode(GameMode.SPECTATOR);else {giveDuelItem(p);giveRankedItem(p);giveKitEditor(p);giveSettingsItem(p);}}); }
     @EventHandler public void onDuelDeath(PlayerDeathEvent e) {
         e.getDrops().removeIf(this::isLobbyItem);
