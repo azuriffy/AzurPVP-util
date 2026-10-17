@@ -111,6 +111,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         getServer().getPluginManager().registerEvents(this, this);
         startLobbyTips();
         startSpectatorWatch();
+        startPlaytimeTracking();
+        startLobbyItemGuard();
+        startAdventureGuard();
         combatTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
             updateCombat(); updateQueueActionBars();
             for (Player online : Bukkit.getOnlinePlayers()) {
@@ -155,6 +158,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }
         saveRoles();
+        for (Player online : Bukkit.getOnlinePlayers()) flushPlaytime(online);
         if (db != null) try { db.close(); } catch (SQLException ignored) {}
     }
 
@@ -411,7 +415,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             s.executeUpdate("CREATE TABLE IF NOT EXISTS duel_history (id INTEGER PRIMARY KEY AUTOINCREMENT, winner_uuid TEXT NOT NULL, winner_name TEXT NOT NULL, loser_uuid TEXT NOT NULL, loser_name TEXT NOT NULL, kit TEXT NOT NULL, winner_score INTEGER NOT NULL, loser_score INTEGER NOT NULL, arena TEXT, ended_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
         }
         // SQLite has no "ADD COLUMN IF NOT EXISTS": a failure just means the column is already there.
-        for (String col : List.of("duel_wins INTEGER DEFAULT 0", "duel_losses INTEGER DEFAULT 0", "duel_streak INTEGER DEFAULT 0", "best_duel_streak INTEGER DEFAULT 0", "elo INTEGER DEFAULT 1000")) {
+        for (String col : List.of("duel_wins INTEGER DEFAULT 0", "duel_losses INTEGER DEFAULT 0", "duel_streak INTEGER DEFAULT 0", "best_duel_streak INTEGER DEFAULT 0", "elo INTEGER DEFAULT 1000", "last_online INTEGER DEFAULT 0")) {
             try (Statement alter = db.createStatement()) { alter.executeUpdate("ALTER TABLE stats ADD COLUMN " + col); } catch (SQLException ignored) {}
         }
         try (Statement st = db.createStatement(); ResultSet rs = st.executeQuery("PRAGMA table_info(stats)")) {
@@ -461,6 +465,17 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             try { db.setAutoCommit(true); } catch (SQLException ignored) {}
         }
     }
+    private void awardKill(Player killer, Player victim) {
+        ensurePlayer(killer); ensurePlayer(victim);
+        stat(victim.getUniqueId(), "deaths", 1);
+        stat(victim.getUniqueId(), "streak", -getStat(victim.getUniqueId(), "streak"));
+        stat(killer.getUniqueId(), "kills", 1);
+        stat(killer.getUniqueId(), "streak", 1);
+        int streak = getStat(killer.getUniqueId(), "streak");
+        if (streak > getStat(killer.getUniqueId(), "best_streak")) {
+            try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET best_streak=? WHERE uuid=?")) { ps.setInt(1, streak); ps.setString(2, killer.getUniqueId().toString()); ps.executeUpdate(); } catch (SQLException ignored) {}
+        }
+    }
     private void ensurePlayer(Player p) {
         try (PreparedStatement ps = db.prepareStatement("INSERT OR IGNORE INTO stats(uuid,name) VALUES(?,?)")) {
             ps.setString(1, p.getUniqueId().toString()); ps.setString(2, p.getName()); ps.executeUpdate();
@@ -472,6 +487,38 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET " + field + "=" + field + "+? WHERE uuid=?")) {
             ps.setInt(1, delta); ps.setString(2, uuid.toString()); ps.executeUpdate();
         } catch (SQLException e) { getLogger().warning("Stats write failed: " + e.getMessage()); }
+    }
+    private long getStatLong(UUID uuid, String field) {
+        if (!Set.of("last_online", "playtime_seconds").contains(field)) return 0;
+        try (PreparedStatement ps = db.prepareStatement("SELECT " + field + " FROM stats WHERE uuid=?")) {
+            ps.setString(1, uuid.toString()); try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getLong(1) : 0; }
+        } catch (SQLException e) { return 0; }
+    }
+    private final Map<UUID, Long> sessionStart = new ConcurrentHashMap<>();
+    private long sessionSeconds(UUID id) { Long st = sessionStart.get(id); return st == null ? 0 : Math.max(0, (System.currentTimeMillis() - st) / 1000); }
+    private void flushPlaytime(Player p) {
+        Long st = sessionStart.remove(p.getUniqueId());
+        if (st == null) return;
+        long secs = Math.max(0, (System.currentTimeMillis() - st) / 1000);
+        try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET playtime_seconds=playtime_seconds+?, last_online=? WHERE uuid=?")) {
+            ps.setLong(1, secs); ps.setLong(2, System.currentTimeMillis()); ps.setString(3, p.getUniqueId().toString()); ps.executeUpdate();
+        } catch (SQLException ex) { getLogger().warning("Could not save playtime: " + ex.getMessage()); }
+    }
+    private void startPlaytimeTracking() {
+        for (Player online : Bukkit.getOnlinePlayers()) sessionStart.put(online.getUniqueId(), System.currentTimeMillis());
+        // Save every 5 minutes so a crash can't lose much playtime.
+        Bukkit.getScheduler().runTaskTimer(this, () -> { for (Player online : Bukkit.getOnlinePlayers()) { flushPlaytime(online); sessionStart.put(online.getUniqueId(), System.currentTimeMillis()); } }, 6000L, 6000L);
+    }
+    @EventHandler public void onStatsJoin(PlayerJoinEvent e) { sessionStart.put(e.getPlayer().getUniqueId(), System.currentTimeMillis()); }
+    @EventHandler public void onStatsQuit(PlayerQuitEvent e) { flushPlaytime(e.getPlayer()); }
+    private String fmtDuration(long sec) {
+        long d = sec / 86400, h = (sec % 86400) / 3600, m = (sec % 3600) / 60;
+        List<String> parts = new ArrayList<>();
+        if (d > 0) parts.add(d + (d == 1 ? " day" : " days"));
+        if (h > 0) parts.add(h + (h == 1 ? " hour" : " hours"));
+        if (m > 0) parts.add(m + (m == 1 ? " minute" : " minutes"));
+        if (parts.isEmpty()) return "less than a minute";
+        return String.join(" ", parts.subList(0, Math.min(2, parts.size())));
     }
     private int getStat(UUID uuid, String field) {
         if (!Set.of("kills","deaths","streak","best_streak","playtime_seconds","duel_wins","duel_losses","duel_streak","best_duel_streak","elo").contains(field)) return 0;
@@ -944,7 +991,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(n.equals("setspawn")) {
             if(!(s instanceof Player p)) {tell(s,"&cPlayers only.");return true;} if(!isDev(p)){tell(s,"&cNo permission.");return true;}
-            Location l=p.getLocation(); getConfig().set("spawn.world",l.getWorld().getName()); getConfig().set("spawn.x",l.getX()); getConfig().set("spawn.y",l.getY()); getConfig().set("spawn.z",l.getZ()); getConfig().set("spawn.yaw",l.getYaw()); getConfig().set("spawn.pitch",l.getPitch()); saveConfig(); tell(p,"&aSpawn saved. &7A 500-block radius is now protected from PvP, block changes, and container access."); return true;
+            Location l=p.getLocation(); getConfig().set("spawn.world",l.getWorld().getName()); getConfig().set("spawn.x",l.getX()); getConfig().set("spawn.y",l.getY()); getConfig().set("spawn.z",l.getZ()); getConfig().set("spawn.yaw",l.getYaw()); getConfig().set("spawn.pitch",l.getPitch()); saveConfig(); tell(p,"&aSpawn saved. &7A 500-block radius is now protected from PvP, block changes, and container access. Players in this world are now in &fAdventure &7mode (not in duels, CPvP arenas or /cmode worlds)."); return true;
         }
         if(n.equals("spawn")) {
             if(!(s instanceof Player p))return true; if(tagged(p)){tell(p,"&cYou cannot teleport while combat-tagged.");return true;}
@@ -954,13 +1001,30 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("stats")) {
             if(a.length==0 && !(s instanceof Player)){tell(s,"Use /stats <player>");return true;}
             OfflinePlayer target=a.length>0?Bukkit.getOfflinePlayer(a[0]):(Player)s;
-            int k=getStat(target.getUniqueId(),"kills"), d=getStat(target.getUniqueId(),"deaths");
-            tell(s,"&dStats for &f"+(target.getName()==null?"Unknown":target.getName()));
-            tell(s,"&7Kills: &d"+k+" &8| &7Deaths: &d"+d+" &8| &7KDR: &d"+String.format(Locale.US,"%.2f",d==0?k:(double)k/d));
-            tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak"));
-            int dw=getStat(target.getUniqueId(),"duel_wins"), dl=getStat(target.getUniqueId(),"duel_losses");
-            tell(s,"&7Duels: &d"+dw+"W &8/ &d"+dl+"L &8| &7WLR: &d"+String.format(Locale.US,"%.2f",dl==0?dw:(double)dw/dl)+" &8| &7Elo: &d"+getStat(target.getUniqueId(),"elo"));
-            tell(s,"&7Duel streak: &d"+getStat(target.getUniqueId(),"duel_streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_duel_streak"));
+            UUID tid=target.getUniqueId();
+            int k=getStat(tid,"kills"), d=getStat(tid,"deaths"), dw=getStat(tid,"duel_wins"), dl=getStat(tid,"duel_losses"), games=dw+dl;
+            Player online=target.getPlayer();
+            long play=getStatLong(tid,"playtime_seconds")+(online!=null?sessionSeconds(tid):0);
+            String last;
+            if(online!=null) last="&aOnline Now";
+            else { long lo=getStatLong(tid,"last_online"); last=lo<=0?"&7Unknown":"&e"+fmtDuration((System.currentTimeMillis()-lo)/1000)+" ago"; }
+            s.sendMessage(" ");
+            s.sendMessage(c("&f&l"+(target.getName()==null?"Unknown":target.getName())));
+            s.sendMessage(" ");
+            s.sendMessage(c("&7Kills: &a"+k));
+            s.sendMessage(c("&7Deaths: &c"+d));
+            s.sendMessage(c("&7K/D Ratio: &6"+String.format(Locale.US,"%.2f",d==0?(double)k:(double)k/d)));
+            s.sendMessage(" ");
+            s.sendMessage(c("&7Wins: &a"+dw));
+            s.sendMessage(c("&7Losses: &c"+dl));
+            s.sendMessage(c("&7Win Rate: &6"+String.format(Locale.US,"%.1f%%",games==0?0.0:dw*100.0/games)));
+            s.sendMessage(c("&7Win Streak: &a"+getStat(tid,"duel_streak")));
+            s.sendMessage(c("&7Best Win Streak: &a"+getStat(tid,"best_duel_streak")));
+            s.sendMessage(c("&7Games Played: &b"+games));
+            s.sendMessage(c("&7Elo: &d"+getStat(tid,"elo")));
+            s.sendMessage(c("&7Playtime: &6"+fmtDuration(play)));
+            s.sendMessage(c("&7Last Online: "+last));
+            s.sendMessage(" ");
             return true;
         }
         if(n.equals("kit")) {
@@ -975,8 +1039,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     p.getInventory().clear();
                     p.getInventory().setArmorContents(null);
                     p.getInventory().setItemInOffHand(null);
+                    kitLoaded.add(p.getUniqueId());
                     tell(p, "&aInventory, armor and offhand cleared. Run &f/kit clear &aagain to restore the Duel sword and Kit editor.");
                 } else {
+                    kitLoaded.remove(p.getUniqueId());
                     giveDuelItem(p);
                     giveKitEditor(p);
                     tell(p, "&dDuel sword and Kit editor restored.");
@@ -1001,12 +1067,28 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 getConfig().set("kits."+kitName+".offhand", p.getInventory().getItemInOffHand());
                 saveConfig(); reloadConfig(); tell(p,"&aUploaded server-default kit &f"+kitName+"&a."); return true;
             }
-            tell(p, isDev(p) ? "&cUse /kit upload <name> or /kit clear." : "&cKit commands are unavailable. Use the Duel sword to select a kit.");
+            if(a.length==1) {
+                if(!isDev(p)) { tell(p, "&cOnly the owner can use /kit <name>. Use the Duel sword to select a kit."); return true; }
+                String kitName=normalizeKitName(a[0]);
+                if(kitName.isBlank() || !getConfig().contains("kits."+kitName)) {
+                    ConfigurationSection ks=getConfig().getConfigurationSection("kits");
+                    tell(p, "&cUnknown kit. Available: &f" + (ks==null ? "none" : String.join(", ", ks.getKeys(false))));
+                    return true;
+                }
+                giveDuelKit(p, kitName);
+                kitLoaded.add(p.getUniqueId());
+                tell(p, "&aLoaded kit &f" + kitName + "&a. Run &f/kit clear &atwice to get your Duel sword and Kit editor back.");
+                return true;
+            }
+            tell(p, isDev(p) ? "&cUse /kit <name>, /kit upload <name> or /kit clear." : "&cKit commands are unavailable. Use the Duel sword to select a kit.");
             return true;
         }
         if(n.equals("duel")) {
-            if(!(s instanceof Player p)||a.length<1){tell(s,"Use /duel <player>");return true;} Player target=Bukkit.getPlayerExact(a[0]);
-            if(target==null||target.equals(p)){tell(p,"&cPlayer not found or invalid.");return true;}
+            if(!(s instanceof Player p)||a.length<1){tell(s,"&cUse /duel <kit> to queue, or /duel <player> to challenge someone.");return true;}
+            String kitArg=normalizeKitName(a[0]);
+            if(!kitArg.isBlank() && getConfig().contains("kits."+kitArg)) { queueForDuel(p,kitArg); return true; }
+            Player target=Bukkit.getPlayerExact(a[0]);
+            if(target==null||target.equals(p)){tell(p,"&cNo kit or player found with that name. Use /duel <kit> to queue, or /duel <player> to challenge someone.");return true;}
             if(!isStaff(p) && settingString(target,"duel_requests").equals("Off")){tell(p,"&c"+target.getName()+" is not accepting duel requests.");return true;}
             duelTargets.put(p.getUniqueId(),target.getName()); duelGuiMode.put(p.getUniqueId(),"challenge"); openKitMenu(p,"duel",target.getName()); return true;
         }
@@ -1064,7 +1146,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("announce")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Bukkit.broadcastMessage(prefix()+c(String.join(" ",a)));return true; }
         if(n.equals("maintenance")) { if(!isDev(s)){tell(s,"&cOwner role required.");return true;} boolean enabled=!getConfig().getBoolean("maintenance.enabled",false);getConfig().set("maintenance.enabled",enabled);saveConfig(); if(enabled) for(Player online:Bukkit.getOnlinePlayers()) if(!isStaff(online)) online.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled.")); tell(s,"&dMaintenance mode "+(enabled?"enabled":"disabled")+".");return true; }
         if(n.equals("settings")) { if(!(s instanceof Player p))return true;openSettings(p);return true; }
-        if(n.equals("playtime")) { if(!(s instanceof Player p))return true;long seconds=getStat(p.getUniqueId(),"playtime_seconds");tell(p,"&dPlaytime: &f"+(seconds/3600)+"h "+((seconds%3600)/60)+"m");return true; }
+        if(n.equals("playtime")) { if(!(s instanceof Player p))return true;long seconds=getStatLong(p.getUniqueId(),"playtime_seconds")+sessionSeconds(p.getUniqueId());tell(p,"&dPlaytime: &f"+fmtDuration(seconds));return true; }
         if(n.equals("cps")) { tell(s,"&7CPS monitoring is not active in this build; use a dedicated anti-cheat for enforcement.");return true; }
         if(n.equals("rules")){tell(s,getConfig().getString("messages.rules","&dBe respectful."));return true;}
         if(n.equals("discord")){tell(s,getConfig().getString("messages.discord","&dSet your Discord invite in config.yml"));return true;}
@@ -1443,6 +1525,59 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private void giveKitEditor(Player p) {
         ItemStack book=namedItem(Material.BOOK,"&d&lKit editor",List.of("&7Click to edit your personal kits"));
         p.getInventory().setItem(7,book);
+        giveSettingsItem(p); // the settings anvil always comes together with the kit editor
+    }
+    private final Set<UUID> kitLoaded = ConcurrentHashMap.newKeySet();      // owner used /kit <name>: don't overwrite their inventory
+    private final Set<UUID> autoAdventure = ConcurrentHashMap.newKeySet();  // players this plugin put into Adventure in the spawn world
+    private boolean inCpvpRegion(Location loc) {
+        ConfigurationSection regions = getConfig().getConfigurationSection("cpvparenas");
+        if (regions == null) return false;
+        for (String id : regions.getKeys(false)) if (isInsideCpvPArena(loc, id)) return true;
+        return false;
+    }
+    // The spawn world (set with /setspawn) is Adventure mode. Duels, spectating, CPvP mining areas,
+    // /cmode worlds and any non-survival gamemode (staff) are left alone.
+    private void startAdventureGuard() {
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            String wn = getConfig().getString("spawn.world", "");
+            if (wn.isBlank()) return;
+            World lobby = Bukkit.getWorld(wn);
+            if (lobby == null) return;
+            boolean bypass = cmodeWorlds.contains(wn);
+            for (Player pl : Bukkit.getOnlinePlayers()) {
+                UUID id = pl.getUniqueId();
+                boolean busy = activeDuels.containsKey(id) || spectating.containsKey(id) || pendingDuelLosers.contains(id);
+                boolean inLobby = pl.getWorld().equals(lobby) && !inCpvpRegion(pl.getLocation());
+                if (inLobby && !bypass && !busy && pl.getGameMode() == GameMode.SURVIVAL) {
+                    pl.setGameMode(GameMode.ADVENTURE);
+                    autoAdventure.add(id);
+                } else if (!inLobby && autoAdventure.remove(id) && pl.getGameMode() == GameMode.ADVENTURE) {
+                    pl.setGameMode(GameMode.SURVIVAL);
+                }
+            }
+        }, 20L, 10L);
+    }
+    private boolean isLobbyItem(ItemStack item) { return isDuelItem(item) || isKitEditor(item) || isSettingsItem(item); }
+    private void giveLobbyItems(Player p) {
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        for (int i = 0; i < inv.getSize(); i++) { if (i == 0 || i == 7 || i == 8) continue; if (isLobbyItem(inv.getItem(i))) inv.setItem(i, null); }
+        if (isLobbyItem(inv.getItemInOffHand())) inv.setItemInOffHand(null);
+        giveDuelItem(p); giveKitEditor(p);
+    }
+    // Safety net: anyone standing in the lobby (not in a duel or spectating) always has all three items in their slots.
+    private void startLobbyItemGuard() {
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (activeDuels.containsKey(online.getUniqueId()) || spectating.containsKey(online.getUniqueId()) || pendingDuelLosers.contains(online.getUniqueId()) || kitLoaded.contains(online.getUniqueId())) continue;
+                if (online.getGameMode() != GameMode.SURVIVAL && online.getGameMode() != GameMode.ADVENTURE) continue;
+                if (!inSpawnProtection(online.getLocation())) continue;
+                org.bukkit.inventory.PlayerInventory inv = online.getInventory();
+                if (!isDuelItem(inv.getItem(0)) || !isKitEditor(inv.getItem(7)) || !isSettingsItem(inv.getItem(8))) giveLobbyItems(online);
+            }
+        }, 40L, 20L);
+    }
+    @EventHandler public void onLobbyItemSwapHand(org.bukkit.event.player.PlayerSwapHandItemEvent e) {
+        if (isLobbyItem(e.getMainHandItem()) || isLobbyItem(e.getOffHandItem())) e.setCancelled(true);
     }
     private boolean isKitEditor(ItemStack item) { return item!=null && item.getType()==Material.BOOK && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&d&lKit editor").equals(item.getItemMeta().getDisplayName()); }
     private ItemStack settingsItem() { return namedItem(Material.ANVIL, "&d&lSettings", List.of("&7Personal PvP settings", "&7Only changes your own preferences")); }
@@ -1670,6 +1805,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         // Stop spectators using the spectator menu to teleport out of the match.
         if (e.getCause() == PlayerTeleportEvent.TeleportCause.SPECTATE && spectating.containsKey(e.getPlayer().getUniqueId())) e.setCancelled(true);
     }
+    @EventHandler public void onKitLoadedQuit(PlayerQuitEvent e) { kitLoaded.remove(e.getPlayer().getUniqueId()); autoAdventure.remove(e.getPlayer().getUniqueId()); }
     @EventHandler public void onSpectatorQuit(PlayerQuitEvent e) {
         if (spectating.remove(e.getPlayer().getUniqueId()) != null) e.getPlayer().setGameMode(GameMode.SURVIVAL);
     }
@@ -1795,7 +1931,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler public void onDuelInventoryClick(InventoryClickEvent e) {
         if(!(e.getWhoClicked() instanceof Player p))return;
         if(isDuelItem(e.getCurrentItem()) || isDuelItem(e.getCursor()) || isKitEditor(e.getCurrentItem()) || isKitEditor(e.getCursor()) || isSettingsItem(e.getCurrentItem()) || isSettingsItem(e.getCursor())) { e.setCancelled(true); return; }
-        if (e.getClick() == org.bukkit.event.inventory.ClickType.NUMBER_KEY && (isSettingsItem(e.getView().getBottomInventory().getItem(e.getHotbarButton())) || isSettingsItem(e.getCurrentItem()))) { e.setCancelled(true); return; }
+        if (e.getClick() == org.bukkit.event.inventory.ClickType.NUMBER_KEY && (isLobbyItem(e.getView().getBottomInventory().getItem(e.getHotbarButton())) || isLobbyItem(e.getCurrentItem()))) { e.setCancelled(true); return; }
+        if (e.getClick() == org.bukkit.event.inventory.ClickType.SWAP_OFFHAND && (isLobbyItem(e.getCurrentItem()) || isLobbyItem(p.getInventory().getItemInOffHand()))) { e.setCancelled(true); return; }
+        if (e.getClick() == org.bukkit.event.inventory.ClickType.DROP || e.getClick() == org.bukkit.event.inventory.ClickType.CONTROL_DROP) { if (isLobbyItem(e.getCurrentItem())) { e.setCancelled(true); return; } }
         String title=ChatColor.stripColor(e.getView().getTitle());
         if(title==null)return;
         if (title.equals("AzurPvP » Settings")) {
@@ -1891,6 +2029,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     @EventHandler public void onDuelInventoryDrag(InventoryDragEvent e) {
+        if (isLobbyItem(e.getOldCursor())) { e.setCancelled(true); return; }
         String title = ChatColor.stripColor(e.getView().getTitle());
         if (title == null) return;
         if (title.contains("Select a Kit") || title.contains("Kit Editor") || title.contains("Duel Settings")) {
@@ -1942,7 +2081,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler public void onDuelJoin(PlayerJoinEvent e) { giveDuelItem(e.getPlayer()); giveKitEditor(e.getPlayer()); giveSettingsItem(e.getPlayer()); }
     @EventHandler public void onDuelRespawn(PlayerRespawnEvent e) { Player p=e.getPlayer(); Bukkit.getScheduler().runTask(this,()->{if(pendingDuelLosers.contains(p.getUniqueId()))p.setGameMode(GameMode.SPECTATOR);else {giveDuelItem(p);giveKitEditor(p);giveSettingsItem(p);}}); }
     @EventHandler public void onDuelDeath(PlayerDeathEvent e) {
-        e.getDrops().removeIf(this::isDuelItem);
+        e.getDrops().removeIf(this::isLobbyItem);
         Player loser = e.getEntity();
         UUID winnerId = activeDuels.get(loser.getUniqueId());
         if (winnerId == null) return;
@@ -1962,6 +2101,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
         int winnerScore = duelRoundWins.merge(winnerId, 1, Integer::sum);
         int loserScore = duelRoundWins.getOrDefault(loserId, 0);
+        awardKill(winner, loser); // every duel round counts as a kill for the winner and a death for the loser
         int rounds = Math.max(1, duelRounds.getOrDefault(winnerId, duelRounds.getOrDefault(loserId, 1)));
         int winsNeeded = rounds / 2 + 1;
         if (playerSetting(winner, "round_messages", true)) tell(winner, "&aRound won! Score: &f" + winnerScore + "-" + loserScore);
@@ -2008,6 +2148,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     @Override public List<String> onTabComplete(CommandSender s, Command cmd, String alias, String[] args) {
+        if(args.length==1 && cmd.getName().equalsIgnoreCase("duel")) {
+            List<String> out=new ArrayList<>();
+            ConfigurationSection ks=getConfig().getConfigurationSection("kits");
+            if(ks!=null) out.addAll(ks.getKeys(false));
+            Bukkit.getOnlinePlayers().forEach(pl->out.add(pl.getName()));
+            return out.stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        }
         if(args.length==1 && cmd.getName().equalsIgnoreCase("leaderboard")) return boards().stream().map(Board::id).filter(v->v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         if(args.length==1 && Set.of("duel","accept","msg","reply","ignore","heal","feed","freeze","stats").contains(cmd.getName().toLowerCase(Locale.ROOT)))
             return Bukkit.getOnlinePlayers().stream().map(Player::getName).filter(n->n.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
