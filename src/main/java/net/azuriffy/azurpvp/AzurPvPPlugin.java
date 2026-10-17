@@ -105,7 +105,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         runKitMigrations();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "cmode")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "delarena", "cmode")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -148,6 +148,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public void onDisable() {
         if (combatTask != null) combatTask.cancel();
+        for (BlockState st : new ArrayList<>(arenaBlockBackups.values())) { try { st.update(true, false); } catch (Exception ignored) { } }
+        arenaBlockBackups.clear();
         // Explicitly flush every loaded world before the plugin shuts down.
         // Paper normally autosaves worlds, but this helps ensure edits are written during a clean stop.
         for (World world : Bukkit.getWorlds()) {
@@ -320,7 +322,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
         Player p = e.getPlayer();
-        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","set");
+        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","delarena","set");
         if (isDev(p)) return;
         e.getCommands().removeIf(command -> {
             String root = command.toLowerCase(Locale.ROOT).split(":")[0];
@@ -332,7 +334,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
-            case "setspawn","maintenance","backup","role","arena","addarena","set","world","tp","cmode" -> "owner";
+            case "setspawn","maintenance","backup","role","arena","addarena","delarena","set","world","tp","cmode" -> "owner";
             case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
             default -> "member";
@@ -649,7 +651,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         for (String key : arenaKeys()) {
             Location center = arenaCenter(key);
             if (center != null && center.getWorld().equals(blockLoc.getWorld()) && center.distanceSquared(blockLoc) <= 10000.0) {
-                e.setCancelled(true);
+                // /addarena <n> true allows breaking below Y=0; false means nothing can be broken.
+                boolean allowBelowZero = getConfig().getBoolean("arenas." + key + ".break-below-zero", false);
+                e.setCancelled(!(allowBelowZero && blockLoc.getBlockY() < 0));
                 return;
             }
         }
@@ -670,6 +674,30 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             e.setCancelled(!allowed);
             return;
         }
+    }
+    // True when an explosion must not destroy this block because it sits inside a registered /addarena arena
+    // (arena flag false = nothing breaks; true = only blocks below Y=0 may break).
+    private boolean arenaProtectsFromExplosion(org.bukkit.block.Block block) {
+        Location loc = block.getLocation();
+        if (loc.getWorld() == null || cmodeWorlds.contains(loc.getWorld().getName())) return false;
+        for (String key : arenaKeys()) {
+            Location center = arenaCenter(key);
+            if (center != null && center.getWorld().equals(loc.getWorld()) && center.distanceSquared(loc) <= 10000.0) {
+                boolean allowBelowZero = getConfig().getBoolean("arenas." + key + ".break-below-zero", false);
+                return !(allowBelowZero && loc.getBlockY() < 0);
+            }
+        }
+        return false;
+    }
+    // End crystals, TNT, creepers, etc.
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void protectArenaFromEntityExplosions(org.bukkit.event.entity.EntityExplodeEvent e) {
+        e.blockList().removeIf(this::arenaProtectsFromExplosion);
+    }
+    // Respawn anchors, beds in the wrong dimension, etc.
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void protectArenaFromBlockExplosions(org.bukkit.event.block.BlockExplodeEvent e) {
+        e.blockList().removeIf(this::arenaProtectsFromExplosion);
     }
     @EventHandler(priority = EventPriority.HIGHEST) public void protectSpawnBlockPlace(BlockPlaceEvent e) {
         // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
@@ -851,7 +879,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             tell(s, "&7Players: &f/spawn, /stats, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report, /spectate, /leave, /leaderboard");
             if (can(s,"staff")) tell(s, "&aStaff: &f/fly, /vanish, /freeze, /staffchat, /whois, /announce");
             if (can(s,"moderation")) tell(s, "&cModeration: &f/ban, /tempban, /unban, /kick, /mute, /unmute, /warn, /history, /heal, /feed, /gamemode, /speed, /clear, /repair");
-            if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup, /arena");
+            if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup, /arena, /addarena, /delarena");
             return true;
         }
         if(n.equals("spectate")) {
@@ -955,6 +983,16 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             p.teleport(new Location(destination, 0.5, Math.max(64, destination.getMinHeight() + 1), 0.5));
             tell(p, "&dTeleported to &f" + destination.getName() + " &dat coordinates &f0,0&d.");
             return true;
+        }
+        if(n.equals("delarena")) {
+            if(!isDev(s)){tell(s,"&cOnly the owner can delete arenas.");return true;}
+            if(a.length!=1||!a[0].matches("\\d{1,9}")){tell(s,"&cUsage: /delarena <number>");return true;}
+            String delId=String.valueOf(Integer.parseInt(a[0]));
+            if(!getConfig().contains("arenas."+delId)){tell(s,"&cArena "+delId+" does not exist.");return true;}
+            if(occupiedDuelArenas.contains(delId)){tell(s,"&cArena "+delId+" is in use right now. Try again after the match.");return true;}
+            discardArenaBackups(delId);
+            getConfig().set("arenas."+delId,null);saveConfig();
+            tell(s,"&aDeleted arena "+delId+" and its spawns.");return true;
         }
         if(n.equals("addarena")) {
             if(!isDev(s)){tell(s,"&cOnly the owner can create arenas.");return true;}
@@ -1271,6 +1309,111 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
     }
 
+    // ---- CPvP arena restore ----
+    // The first form of every block that changes inside a CPvP duel arena is remembered (first change wins),
+    // and the arena is rebuilt once the match is over. Arenas in /cmode worlds are never tracked, so the owner
+    // can edit an arena with /cmode and the edited version simply becomes the new "first form".
+    private record BlockKey(UUID world, int x, int y, int z) {}
+    private final Map<BlockKey, BlockState> arenaBlockBackups = new ConcurrentHashMap<>();
+    private final Set<String> restoringArenas = ConcurrentHashMap.newKeySet();
+
+    private String cpvpArenaAt(Location loc) {
+        if (loc == null || loc.getWorld() == null || cmodeWorlds.contains(loc.getWorld().getName())) return null;
+        for (String key : arenaKeys()) {
+            Location center = arenaCenter(key);
+            if (center != null && center.getWorld().equals(loc.getWorld()) && center.distanceSquared(loc) <= 10000.0)
+                return cpvpRegionForArena(key) != null ? key : null;
+        }
+        return null;
+    }
+    private void recordArenaState(BlockState state) {
+        if (state == null) return;
+        Location loc = state.getLocation();
+        if (loc == null || loc.getWorld() == null) return;
+        BlockKey key = new BlockKey(loc.getWorld().getUID(), loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+        if (arenaBlockBackups.containsKey(key) || cpvpArenaAt(loc) == null) return;
+        arenaBlockBackups.put(key, state);
+    }
+    private boolean inArenaSphere(BlockKey k, Location center) {
+        double dx = k.x() - center.getX(), dy = k.y() - center.getY(), dz = k.z() - center.getZ();
+        return dx * dx + dy * dy + dz * dz <= 10000.0;
+    }
+    private boolean arenaHasBackups(String arenaId) {
+        Location center = arenaCenter(arenaId);
+        if (center == null || center.getWorld() == null) return false;
+        UUID worldId = center.getWorld().getUID();
+        for (BlockKey k : arenaBlockBackups.keySet()) if (k.world().equals(worldId) && inArenaSphere(k, center)) return true;
+        return false;
+    }
+    private void discardArenaBackups(String arenaId) {
+        Location center = arenaCenter(arenaId);
+        if (center == null || center.getWorld() == null) return;
+        UUID worldId = center.getWorld().getUID();
+        arenaBlockBackups.keySet().removeIf(k -> k.world().equals(worldId) && inArenaSphere(k, center));
+        restoringArenas.remove(arenaId);
+    }
+    // Called when a duel/party match ends. An arena that needs rebuilding stays "occupied" until it is rebuilt.
+    private void releaseDuelArena(String arenaId) {
+        if (arenaId == null) return;
+        if (arenaHasBackups(arenaId)) { restoringArenas.add(arenaId); return; }
+        occupiedDuelArenas.remove(arenaId);
+    }
+    private void finishArenaRestore(String arenaId) {
+        if (restoringArenas.remove(arenaId)) occupiedDuelArenas.remove(arenaId);
+    }
+    private void startArenaRestore(String arenaId) {
+        boolean deferred = restoringArenas.contains(arenaId);
+        if (!deferred && occupiedDuelArenas.contains(arenaId)) return; // another match is using it; that match restores it
+        Location center = arenaCenter(arenaId);
+        if (center == null || center.getWorld() == null) { finishArenaRestore(arenaId); return; }
+        final UUID worldId = center.getWorld().getUID();
+        final List<BlockKey> keys = new ArrayList<>();
+        for (BlockKey k : arenaBlockBackups.keySet()) if (k.world().equals(worldId) && inArenaSphere(k, center)) keys.add(k);
+        if (keys.isEmpty()) { finishArenaRestore(arenaId); return; }
+        // Rebuild in batches so a big crater does not freeze the server.
+        new org.bukkit.scheduler.BukkitRunnable() {
+            int index = 0;
+            @Override public void run() {
+                int end = Math.min(index + 1500, keys.size());
+                for (; index < end; index++) {
+                    BlockState st = arenaBlockBackups.remove(keys.get(index));
+                    if (st != null) { try { st.update(true, false); } catch (Exception ignored) { } }
+                }
+                if (index >= keys.size()) { cancel(); finishArenaRestore(arenaId); }
+            }
+        }.runTaskTimer(this, 1L, 1L);
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaBreak(BlockBreakEvent e) { recordArenaState(e.getBlock().getState()); }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaPlace(BlockPlaceEvent e) {
+        if (e instanceof org.bukkit.event.block.BlockMultiPlaceEvent multi) for (BlockState st : multi.getReplacedBlockStates()) recordArenaState(st);
+        else recordArenaState(e.getBlockReplacedState());
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaEntityExplosion(org.bukkit.event.entity.EntityExplodeEvent e) {
+        for (Block b : e.blockList()) recordArenaState(b.getState());
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaBlockExplosion(org.bukkit.event.block.BlockExplodeEvent e) {
+        if (e.getBlock().getType() != Material.AIR) recordArenaState(e.getBlock().getState());
+        for (Block b : e.blockList()) recordArenaState(b.getState());
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaBurn(org.bukkit.event.block.BlockBurnEvent e) { recordArenaState(e.getBlock().getState()); }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaIgnite(org.bukkit.event.block.BlockIgniteEvent e) { recordArenaState(e.getBlock().getState()); }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaFlow(org.bukkit.event.block.BlockFromToEvent e) {
+        if (!arenaBlockBackups.isEmpty()) recordArenaState(e.getToBlock().getState());
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaBucketEmpty(PlayerBucketEmptyEvent e) { recordArenaState(e.getBlock().getState()); }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaBucketFill(PlayerBucketFillEvent e) { recordArenaState(e.getBlock().getState()); }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void trackArenaEntityChange(org.bukkit.event.entity.EntityChangeBlockEvent e) { recordArenaState(e.getBlock().getState()); }
+
     private List<String> arenaKeys() { ConfigurationSection sec=getConfig().getConfigurationSection("arenas"); if(sec==null)return Collections.emptyList(); return new ArrayList<>(sec.getKeys(false)); }
     private Location arenaCenter(String id) { String path="arenas."+id; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z")); }
     private Location arenaSpawn(String id,int n) { String path="arenas."+id+".spawn"+n; if(!getConfig().contains(path+".world"))return null; World w=Bukkit.getWorld(getConfig().getString(path+".world","")); if(w==null)return null; return new Location(w,getConfig().getDouble(path+".x"),getConfig().getDouble(path+".y"),getConfig().getDouble(path+".z"),(float)getConfig().getDouble(path+".yaw"),(float)getConfig().getDouble(path+".pitch")); }
@@ -1372,7 +1515,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         } else getLogger().warning("[DuelStats] finishDuel skipped recording (duel already finished): " + winner.getName() + " vs " + loser.getName());
         String finishedArenaId = duelArenaByPlayer.get(winner.getUniqueId());
         if (finishedArenaId == null) finishedArenaId = duelArenaByPlayer.get(loser.getUniqueId());
-        if (finishedArenaId != null) occupiedDuelArenas.remove(finishedArenaId);
+        releaseDuelArena(finishedArenaId);
         final String arenaToClean = finishedArenaId;
         activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId()); duelRoundWins.remove(winner.getUniqueId()); duelRoundWins.remove(loser.getUniqueId());arenaCombat.remove(winner.getUniqueId());arenaCombat.remove(loser.getUniqueId());combatUntil.remove(winner.getUniqueId());combatUntil.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
         if(playerSetting(winner,"duel_titles",true))winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);if(playerSetting(loser,"duel_titles",true))loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
@@ -1435,6 +1578,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     private void cleanArenaEntities(String arenaId) {
+        startArenaRestore(arenaId); // rebuild any blocks changed during the match (CPvP arenas)
         Location center = arenaCenter(arenaId);
         if (center == null || center.getWorld() == null) return;
         for (Entity entity : center.getWorld().getNearbyEntities(center, 100.0, 256.0, 100.0)) {
@@ -2427,7 +2571,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     private void finishPartyMatch(PartyMatch m) {
         m.ended = true;
-        occupiedDuelArenas.remove(m.arena);
+        releaseDuelArena(m.arena);
         if (m.party.match == m) m.party.match = null;
         Location lobby = lobbySpawnLocation();
         for (UUID id : new ArrayList<>(m.participants)) {
