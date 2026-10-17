@@ -102,7 +102,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             saveConfig();
         }
         ensureDefaultKits();
-        addWoodenSwordToKits();
+        runKitMigrations();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
         for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "cmode")) {
@@ -304,7 +304,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             try {
                 // Invoke through the Score API interface (not the server's implementation class),
                 // otherwise the implementation's non-public class can make reflection fail.
-                Class<?> nf = Class.forName("org.bukkit.scoreboard.NumberFormat");
+                Class<?> nf = Class.forName("io.papermc.paper.scoreboard.numbers.NumberFormat");
                 Object blank = nf.getMethod("blank").invoke(null);
                 try { org.bukkit.scoreboard.Score.class.getMethod("numberFormat", nf).invoke(sc, blank); }
                 catch (NoSuchMethodException ex) { org.bukkit.scoreboard.Score.class.getMethod("setNumberFormat", nf).invoke(sc, blank); }
@@ -1054,12 +1054,16 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 if(!isDev(p)) { tell(p,"&cOnly the owner can create kits."); return true; }
                 String kitName=normalizeKitName(a[1]);
                 if(kitName.isBlank()) { tell(p,"&cUse /kit create <name>"); return true; }
-                if(getConfig().contains("kits."+kitName)) { tell(p,"&cKit &f"+kitName+" &calready exists. Load it with &f/kit "+kitName+"&c, change it, then &f/kit upload "+kitName+"&c. To start from empty, &f/kit delete "+kitName+" &cfirst."); return true; }
-                getConfig().set("kits."+kitName+".contents", new ItemStack[36]);
-                getConfig().set("kits."+kitName+".armor", new ItemStack[4]);
+                if(getConfig().contains("kits."+kitName)) { tell(p,"&cKit &f"+kitName+" &calready exists. Load it with &f/kit "+kitName+"&c, change it, then &f/kit upload "+kitName+"&c. To rebuild it from the defaults, &f/kit delete"+kitName+" &cfirst."); return true; }
+                // New kits start with a diamond sword and full diamond armor.
+                ItemStack[] starterContents = new ItemStack[36];
+                starterContents[0] = new ItemStack(Material.DIAMOND_SWORD);
+                ItemStack[] starterArmor = { new ItemStack(Material.DIAMOND_BOOTS), new ItemStack(Material.DIAMOND_LEGGINGS), new ItemStack(Material.DIAMOND_CHESTPLATE), new ItemStack(Material.DIAMOND_HELMET) };
+                getConfig().set("kits."+kitName+".contents", starterContents);
+                getConfig().set("kits."+kitName+".armor", starterArmor);
                 getConfig().set("kits."+kitName+".cooldown-seconds", 0);
                 saveConfig(); reloadConfig();
-                tell(p,"&aCreated empty kit &f"+kitName+"&a. Load it with &f/kit "+kitName+"&a, fill your inventory, then run &f/kit upload "+kitName+"&a.");
+                tell(p,"&aCreated kit &f"+kitName+"&a with a diamond sword and full diamond armor. Load it with &f/kit "+kitName+"&a, adjust your inventory, then run &f/kit upload "+kitName+"&a.");
                 return true;
             }
             if(a.length >= 2 && a[0].equalsIgnoreCase("delete")) {
@@ -1167,6 +1171,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("whois")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Player t=Bukkit.getPlayerExact(a[0]);if(t==null){tell(s,"&cPlayer not found.");return true;}tell(s,"&d"+t.getName()+" &7UUID: &f"+t.getUniqueId()+" &7Ping: &f"+t.getPing()+"ms &7Role: &f"+roleOf(t.getUniqueId()));return true; }
         if(n.equals("announce")) { if(!isStaff(s)){tell(s,"&cStaff role required.");return true;} if(a.length<1)return true;Bukkit.broadcastMessage(prefix()+c(String.join(" ",a)));return true; }
         if(n.equals("maintenance")) { if(!isDev(s)){tell(s,"&cOwner role required.");return true;} boolean enabled=!getConfig().getBoolean("maintenance.enabled",false);getConfig().set("maintenance.enabled",enabled);saveConfig(); if(enabled) for(Player online:Bukkit.getOnlinePlayers()) if(!isStaff(online)) online.kickPlayer(c("&5AzurPvP &8» &cServer maintenance is enabled.")); tell(s,"&dMaintenance mode "+(enabled?"enabled":"disabled")+".");return true; }
+        if(n.equals("party")) { partyCommand(s,a); return true; }
         if(n.equals("settings")) { if(!(s instanceof Player p))return true;openSettings(p);return true; }
         if(n.equals("playtime")) { if(!(s instanceof Player p))return true;long seconds=getStatLong(p.getUniqueId(),"playtime_seconds")+sessionSeconds(p.getUniqueId());tell(p,"&dPlaytime: &f"+fmtDuration(seconds));return true; }
         if(n.equals("cps")) { tell(s,"&7CPS monitoring is not active in this build; use a dedicated anti-cheat for enforcement.");return true; }
@@ -1187,6 +1192,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private void queueForDuel(Player player, String kit) {
         UUID playerId = player.getUniqueId();
+        if (partyByPlayer.containsKey(playerId)) { tell(player, "&cYou can't queue while you are in a party. Leave or disband it first."); return; }
         if (activeDuels.containsKey(playerId)) { tell(player, "&cYou are already in a duel."); return; }
         if (spectating.containsKey(playerId)) { tell(player, "&cUse &f/leave &cbefore queueing."); return; }
         String normalizedKit = normalizeKitName(kit);
@@ -1529,7 +1535,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private Material kitIcon(String key) { return kitIconItem(key).getType(); }
     // One-time migration: kits already saved in config.yml don't pick up changes to the defaults,
     // so put a wooden sword into the first empty storage slot of these kits (skipped if one is already there).
-    private void addWoodenSwordToKits() {
+    private void runKitMigrations() {
         List<String> kitNames = List.of("spear_mace", "diamond_smp", "diamond_pot", "neth_pot");
         boolean changed = false;
         if (!getConfig().getBoolean("migrations.wooden-sword-kits-v1", false)) {
@@ -1548,22 +1554,33 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             getConfig().set("migrations.wooden-sword-personal-kits-v1", true);
             changed = true;
         }
+        // Golden heads for the UHC kit (server kit and personal copies).
+        if (!getConfig().getBoolean("migrations.golden-head-uhc-v1", false)) {
+            if (getConfig().contains("kits.uhc")) addItemAt("kits.uhc.contents", goldenHeadItem(3), this::isGoldenHead);
+            ConfigurationSection uhcPersonal = getConfig().getConfigurationSection("player-kits");
+            if (uhcPersonal != null) for (String uuid : uhcPersonal.getKeys(false)) {
+                if (getConfig().contains("player-kits." + uuid + ".uhc.contents")) addItemAt("player-kits." + uuid + ".uhc.contents", goldenHeadItem(3), this::isGoldenHead);
+            }
+            getConfig().set("migrations.golden-head-uhc-v1", true);
+            changed = true;
+        }
         if (changed) saveConfig();
     }
     // Puts a wooden sword in the first empty storage slot at the given contents path (skipped if one is already there).
-    private void addWoodenSwordAt(String path) {
+    private void addWoodenSwordAt(String path) { addItemAt(path, new ItemStack(Material.WOODEN_SWORD), it -> it.getType() == Material.WOODEN_SWORD); }
+    private void addItemAt(String path, ItemStack item, java.util.function.Predicate<ItemStack> present) {
         List<?> existing = getConfig().getList(path);
         ItemStack[] contents = new ItemStack[36];
         if (existing != null) for (int i = 0; i < Math.min(36, existing.size()); i++) if (existing.get(i) instanceof ItemStack it) contents[i] = it;
-        for (ItemStack it : contents) if (it != null && it.getType() == Material.WOODEN_SWORD) return;
+        for (ItemStack it : contents) if (it != null && present.test(it)) return;
         for (int i = 0; i < 36; i++) {
             if (contents[i] == null || contents[i].getType() == Material.AIR) {
-                contents[i] = new ItemStack(Material.WOODEN_SWORD);
+                contents[i] = item.clone();
                 getConfig().set(path, Arrays.asList(contents));
                 return;
             }
         }
-        getLogger().warning("No free slot for the wooden sword at " + path);
+        getLogger().warning("No free slot for the new kit item at " + path);
     }
     private void ensureDefaultKits() {
         String[] names={"sword","axe","mace","spear_mace","diamond_pot","neth_pot","uhc","diamond_smp","vanilla"};
@@ -1576,7 +1593,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 case "spear_mace" -> { contents[0]=new ItemStack(Material.MACE); contents[1]=new ItemStack(Material.WIND_CHARGE,16); contents[2]=new ItemStack(Material.ENDER_PEARL,8); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); contents[4]=new ItemStack(Material.WOODEN_SWORD); }
                 case "diamond_pot" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); contents[3]=new ItemStack(Material.GOLDEN_APPLE,16); contents[4]=new ItemStack(Material.WOODEN_SWORD); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
                 case "neth_pot" -> { contents[0]=new ItemStack(Material.NETHERITE_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); contents[3]=new ItemStack(Material.WOODEN_SWORD); armor[0]=new ItemStack(Material.NETHERITE_BOOTS); armor[1]=new ItemStack(Material.NETHERITE_LEGGINGS); armor[2]=new ItemStack(Material.NETHERITE_CHESTPLATE); armor[3]=new ItemStack(Material.NETHERITE_HELMET); }
-                case "uhc" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.BOW); contents[2]=new ItemStack(Material.ARROW,32); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); contents[4]=new ItemStack(Material.WATER_BUCKET); contents[5]=new ItemStack(Material.LAVA_BUCKET); }
+                case "uhc" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.BOW); contents[2]=new ItemStack(Material.ARROW,32); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); contents[4]=new ItemStack(Material.WATER_BUCKET); contents[5]=new ItemStack(Material.LAVA_BUCKET); contents[6]=goldenHeadItem(3); }
                 case "diamond_smp" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.DIAMOND_PICKAXE); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); contents[3]=new ItemStack(Material.WOODEN_SWORD); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
                 default -> { contents[0]=new ItemStack(Material.IRON_SWORD); contents[1]=new ItemStack(Material.BOW); contents[2]=new ItemStack(Material.ARROW,32); contents[3]=new ItemStack(Material.COOKED_BEEF,16); }
             }
@@ -1588,6 +1605,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ItemStack book=namedItem(Material.BOOK,"&d&lKit editor",List.of("&7Click to edit your personal kits"));
         p.getInventory().setItem(7,book);
         giveSettingsItem(p); // the settings anvil always comes together with the kit editor
+        givePartyItem(p);    // and so does the party cake (hotbar slot 3)
     }
     private final Set<UUID> kitLoaded = ConcurrentHashMap.newKeySet();      // owner used /kit <name>: don't overwrite their inventory
     private final Set<UUID> autoAdventure = ConcurrentHashMap.newKeySet();  // players this plugin put into Adventure in the spawn world
@@ -1619,10 +1637,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }, 20L, 10L);
     }
-    private boolean isLobbyItem(ItemStack item) { return isDuelItem(item) || isKitEditor(item) || isSettingsItem(item); }
+    private boolean isLobbyItem(ItemStack item) { return isDuelItem(item) || isKitEditor(item) || isSettingsItem(item) || isPartyItem(item); }
     private void giveLobbyItems(Player p) {
         org.bukkit.inventory.PlayerInventory inv = p.getInventory();
-        for (int i = 0; i < inv.getSize(); i++) { if (i == 0 || i == 7 || i == 8) continue; if (isLobbyItem(inv.getItem(i))) inv.setItem(i, null); }
+        for (int i = 0; i < inv.getSize(); i++) { if (i == 0 || i == 2 || i == 7 || i == 8) continue; if (isLobbyItem(inv.getItem(i))) inv.setItem(i, null); }
         if (isLobbyItem(inv.getItemInOffHand())) inv.setItemInOffHand(null);
         giveDuelItem(p); giveKitEditor(p);
     }
@@ -1634,7 +1652,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 if (online.getGameMode() != GameMode.SURVIVAL && online.getGameMode() != GameMode.ADVENTURE) continue;
                 if (!inSpawnProtection(online.getLocation())) continue;
                 org.bukkit.inventory.PlayerInventory inv = online.getInventory();
-                if (!isDuelItem(inv.getItem(0)) || !isKitEditor(inv.getItem(7)) || !isSettingsItem(inv.getItem(8))) giveLobbyItems(online);
+                // Party members must NOT have the duel sword; everyone else must.
+                boolean inParty = partyByPlayer.containsKey(online.getUniqueId());
+                boolean duelSlotOk = inParty ? !isDuelItem(inv.getItem(0)) : isDuelItem(inv.getItem(0));
+                if (!duelSlotOk || !isPartyItem(inv.getItem(2)) || !isKitEditor(inv.getItem(7)) || !isSettingsItem(inv.getItem(8))) giveLobbyItems(online);
             }
         }, 40L, 20L);
     }
@@ -1879,6 +1900,300 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         else if (root.equals("duel") || root.equals("accept")) { e.setCancelled(true); tell(p, "&cUse &f/leave &cfirst."); }
     }
 
+    // ---------- Golden head (UHC) ----------
+    private static final UUID GOLDEN_HEAD_PROFILE = UUID.nameUUIDFromBytes("azurpvp-golden-head".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    private ItemStack goldenHeadItem(int amount) {
+        ItemStack head = namedItem(Material.PLAYER_HEAD, "&6&lGolden Head", List.of("&7Right-click to eat", "&7Regeneration II &8(&f0:09&8)", "&7Absorption &8(&f2:00&8)"));
+        head.setAmount(Math.max(1, amount));
+        // Optional custom skin: put a base64 "textures" value (e.g. from minecraft-heads.com) in config.yml as golden-head-texture.
+        String texture = getConfig().getString("golden-head-texture", "");
+        if (!texture.isBlank() && head.getItemMeta() instanceof org.bukkit.inventory.meta.SkullMeta sm) {
+            try {
+                com.destroystokyo.paper.profile.PlayerProfile profile = Bukkit.createProfile(GOLDEN_HEAD_PROFILE);
+                profile.setProperty(new com.destroystokyo.paper.profile.ProfileProperty("textures", texture));
+                sm.setPlayerProfile(profile);
+                head.setItemMeta(sm);
+            } catch (Throwable ignored) { }
+        }
+        return head;
+    }
+    private boolean isGoldenHead(ItemStack item) {
+        return item != null && item.getType() == Material.PLAYER_HEAD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&6&lGolden Head").equals(item.getItemMeta().getDisplayName());
+    }
+    @EventHandler public void onGoldenHeadEat(PlayerInteractEvent e) {
+        if (e.getAction() != Action.RIGHT_CLICK_AIR && e.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        if (!isGoldenHead(e.getItem()) || e.getHand() == null) return;
+        e.setCancelled(true); // stop the head from being placed as a block
+        Player p = e.getPlayer();
+        if (p.getGameMode() == GameMode.SPECTATOR || duelCountdown.contains(p.getUniqueId())) return;
+        ItemStack inHand = p.getInventory().getItem(e.getHand());
+        if (!isGoldenHead(inHand)) return;
+        if (inHand.getAmount() <= 1) p.getInventory().setItem(e.getHand(), null); else inHand.setAmount(inHand.getAmount() - 1);
+        p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.REGENERATION, 180, 1));
+        p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.ABSORPTION, 2400, 0));
+        p.playSound(p.getLocation(), org.bukkit.Sound.ENTITY_GENERIC_EAT, 1.0f, 1.0f);
+    }
+
+    // ---------- Parties ----------
+    private static final class Party {
+        UUID leader;
+        final LinkedHashSet<UUID> members = new LinkedHashSet<>();
+        Party(UUID leader) { this.leader = leader; members.add(leader); }
+    }
+    private final Map<UUID, Party> partyByPlayer = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<UUID, Long>> partyInvites = new ConcurrentHashMap<>(); // invitee -> (inviter -> expiry millis)
+
+    private int partyMaxSize() { return Math.max(2, getConfig().getInt("party.max-size", 8)); }
+    private Party partyOf(Player p) { return partyByPlayer.get(p.getUniqueId()); }
+    private String nameOf(UUID id) {
+        Player online = Bukkit.getPlayer(id);
+        if (online != null) return online.getName();
+        String n = Bukkit.getOfflinePlayer(id).getName();
+        return n == null ? "Unknown" : n;
+    }
+    private ItemStack partyItem() {
+        return settingIcon(Material.CAKE, true, "&d&lParty", List.of("&7Click to create or manage your party"));
+    }
+    private boolean isPartyItem(ItemStack item) {
+        return item != null && item.getType() == Material.CAKE && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&d&lParty").equals(item.getItemMeta().getDisplayName());
+    }
+    private void givePartyItem(Player p) { p.getInventory().setItem(2, partyItem()); }
+
+    // Gives/takes the lobby hotbar items after a party change. Players mid-duel are fixed when their duel ends.
+    private void refreshPartyItems(Player p) {
+        UUID id = p.getUniqueId();
+        if (!p.isOnline() || activeDuels.containsKey(id) || spectating.containsKey(id) || pendingDuelLosers.contains(id) || kitLoaded.contains(id)) return;
+        giveDuelItem(p);
+        givePartyItem(p);
+    }
+    private void partyBroadcast(Party party, String msg) {
+        for (UUID id : party.members) { Player m = Bukkit.getPlayer(id); if (m != null) tell(m, msg); }
+    }
+    private boolean partyBlocked(Player p) {
+        UUID id = p.getUniqueId();
+        if (activeDuels.containsKey(id)) { tell(p, "&cYou can't do that during a duel."); return true; }
+        if (spectating.containsKey(id)) { tell(p, "&cUse &f/leave &cbefore joining a party."); return true; }
+        return false;
+    }
+    private void enteredParty(Player p) {
+        duelQueue.remove(p.getUniqueId());
+        p.sendActionBar(net.kyori.adventure.text.Component.empty());
+        partyInvites.remove(p.getUniqueId());
+        refreshPartyItems(p);
+    }
+    private void createParty(Player p) {
+        if (partyByPlayer.containsKey(p.getUniqueId())) { tell(p, "&cYou are already in a party."); return; }
+        if (partyBlocked(p)) return;
+        partyByPlayer.put(p.getUniqueId(), new Party(p.getUniqueId()));
+        enteredParty(p);
+        tell(p, "&aParty created! Invite players with &f/party invite <player> &aor the cake. Queueing is disabled while you are in a party.");
+    }
+    private void invitePlayer(Player leader, Player target) {
+        Party party = partyOf(leader);
+        if (party == null) { tell(leader, "&cYou are not in a party. Use &f/party create&c."); return; }
+        if (!party.leader.equals(leader.getUniqueId())) { tell(leader, "&cOnly the party leader can invite players."); return; }
+        if (target.equals(leader)) { tell(leader, "&cYou can't invite yourself."); return; }
+        if (partyByPlayer.containsKey(target.getUniqueId())) { tell(leader, "&c" + target.getName() + " is already in a party."); return; }
+        if (ignored.getOrDefault(target.getUniqueId(), Set.of()).contains(leader.getUniqueId())) { tell(leader, "&cThat player is ignoring you."); return; }
+        if (party.members.size() >= partyMaxSize()) { tell(leader, "&cYour party is full."); return; }
+        long expires = System.currentTimeMillis() + getConfig().getLong("party.invite-seconds", 60L) * 1000L;
+        partyInvites.computeIfAbsent(target.getUniqueId(), k -> new ConcurrentHashMap<>()).put(leader.getUniqueId(), expires);
+        tell(leader, "&dInvited &f" + target.getName() + " &dto your party.");
+        net.kyori.adventure.text.Component line = net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection()
+            .deserialize(prefix() + c("&d" + leader.getName() + " &7invited you to their party. "))
+            .append(net.kyori.adventure.text.Component.text("[ACCEPT]", net.kyori.adventure.text.format.NamedTextColor.GREEN, net.kyori.adventure.text.format.TextDecoration.BOLD)
+                .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand("/party accept " + leader.getName())));
+        target.sendMessage(line);
+    }
+    private void acceptPartyInvite(Player p, String fromName) {
+        if (partyByPlayer.containsKey(p.getUniqueId())) { tell(p, "&cYou are already in a party. Use &f/party leave &cfirst."); return; }
+        if (partyBlocked(p)) return;
+        Map<UUID, Long> mine = partyInvites.get(p.getUniqueId());
+        long now = System.currentTimeMillis();
+        UUID chosen = null;
+        if (mine != null) {
+            mine.values().removeIf(exp -> exp < now);
+            for (UUID inviterId : mine.keySet()) {
+                Player inviter = Bukkit.getPlayer(inviterId);
+                if (inviter == null) continue;
+                if (fromName == null || inviter.getName().equalsIgnoreCase(fromName)) { chosen = inviterId; break; }
+            }
+        }
+        if (chosen == null) { tell(p, "&cNo matching party invite."); return; }
+        Party party = partyByPlayer.get(chosen);
+        if (party == null) { mine.remove(chosen); tell(p, "&cThat party no longer exists."); return; }
+        if (party.members.size() >= partyMaxSize()) { tell(p, "&cThat party is full."); return; }
+        party.members.add(p.getUniqueId());
+        partyByPlayer.put(p.getUniqueId(), party);
+        enteredParty(p);
+        tell(p, "&aYou joined &f" + nameOf(party.leader) + "&a's party. Queueing is disabled while you are in a party.");
+        partyBroadcast(party, "&d" + p.getName() + " &7joined the party.");
+    }
+    // how: "leave", "kick" or "quit". A leader who leaves hands leadership to the next member.
+    private void removeFromParty(UUID id, String how) {
+        Party party = partyByPlayer.remove(id);
+        if (party == null) return;
+        party.members.remove(id);
+        Player gone = Bukkit.getPlayer(id);
+        String name = nameOf(id);
+        if (!party.members.isEmpty()) {
+            partyBroadcast(party, "&d" + name + (how.equals("kick") ? " &7was kicked from the party." : " &7left the party."));
+            if (party.leader.equals(id)) {
+                party.leader = party.members.iterator().next();
+                partyBroadcast(party, "&d" + nameOf(party.leader) + " &7is now the party leader.");
+            }
+        }
+        if (gone != null && !how.equals("quit")) {
+            tell(gone, how.equals("kick") ? "&cYou were kicked from the party." : "&7You left the party.");
+            refreshPartyItems(gone);
+        }
+    }
+    private void leaveParty(Player p) {
+        if (partyOf(p) == null) { tell(p, "&cYou are not in a party."); return; }
+        removeFromParty(p.getUniqueId(), "leave");
+    }
+    private void disbandParty(Party party) {
+        List<UUID> ids = new ArrayList<>(party.members);
+        for (UUID id : ids) partyByPlayer.remove(id);
+        party.members.clear();
+        for (UUID id : ids) {
+            Player m = Bukkit.getPlayer(id);
+            if (m == null) continue;
+            tell(m, "&cThe party was disbanded.");
+            refreshPartyItems(m);
+        }
+    }
+    private void kickFromParty(Player leader, String targetName) {
+        Party party = partyOf(leader);
+        if (party == null) { tell(leader, "&cYou are not in a party."); return; }
+        if (!party.leader.equals(leader.getUniqueId())) { tell(leader, "&cOnly the party leader can kick players."); return; }
+        Player target = Bukkit.getPlayerExact(targetName);
+        if (target == null || !party.members.contains(target.getUniqueId())) { tell(leader, "&cThat player is not in your party."); return; }
+        if (target.equals(leader)) { tell(leader, "&cUse &f/party disband &cor &f/party leave &cinstead."); return; }
+        removeFromParty(target.getUniqueId(), "kick");
+        tell(leader, "&dKicked &f" + target.getName() + "&d from the party.");
+    }
+    private void listParty(Player p) {
+        Party party = partyOf(p);
+        if (party == null) { tell(p, "&cYou are not in a party."); return; }
+        tell(p, "&dParty &8(&f" + party.members.size() + "&8/&f" + partyMaxSize() + "&8)&d:");
+        for (UUID id : party.members) tell(p, "&8- &f" + nameOf(id) + (id.equals(party.leader) ? " &6(leader)" : ""));
+    }
+    private void partyCommand(CommandSender s, String[] a) {
+        if (!(s instanceof Player p)) { tell(s, "&cPlayers only."); return; }
+        if (a.length == 0) { openParty(p); return; }
+        switch (a[0].toLowerCase(Locale.ROOT)) {
+            case "create" -> createParty(p);
+            case "disband" -> {
+                Party party = partyOf(p);
+                if (party == null) tell(p, "&cYou are not in a party.");
+                else if (!party.leader.equals(p.getUniqueId())) tell(p, "&cOnly the party leader can disband the party. Use &f/party leave&c.");
+                else disbandParty(party);
+            }
+            case "invite" -> {
+                if (a.length < 2) { tell(p, "&cUsage: /party invite <player>"); return; }
+                Player t = Bukkit.getPlayerExact(a[1]);
+                if (t == null) tell(p, "&cThat player is not online."); else invitePlayer(p, t);
+            }
+            case "accept", "join" -> acceptPartyInvite(p, a.length > 1 ? a[1] : null);
+            case "deny" -> {
+                Map<UUID, Long> mine = partyInvites.get(p.getUniqueId());
+                if (mine == null || mine.isEmpty()) { tell(p, "&cYou have no party invites."); return; }
+                if (a.length > 1) { Player from = Bukkit.getPlayerExact(a[1]); if (from != null) mine.remove(from.getUniqueId()); } else mine.clear();
+                tell(p, "&7Party invite declined.");
+            }
+            case "leave" -> leaveParty(p);
+            case "kick" -> {
+                if (a.length < 2) { tell(p, "&cUsage: /party kick <player>"); return; }
+                kickFromParty(p, a[1]);
+            }
+            case "promote" -> {
+                if (a.length < 2) { tell(p, "&cUsage: /party promote <player>"); return; }
+                Party party = partyOf(p);
+                if (party == null || !party.leader.equals(p.getUniqueId())) { tell(p, "&cOnly the party leader can do that."); return; }
+                Player t = Bukkit.getPlayerExact(a[1]);
+                if (t == null || t.equals(p) || !party.members.contains(t.getUniqueId())) { tell(p, "&cThat player is not another member of your party."); return; }
+                party.leader = t.getUniqueId();
+                partyBroadcast(party, "&d" + t.getName() + " &7is now the party leader.");
+            }
+            case "list", "info" -> listParty(p);
+            default -> tell(p, "&dParty: &f/party create, disband, invite <player>, accept [player], deny, leave, kick <player>, promote <player>, list &7(or click the cake)");
+        }
+    }
+    private void openParty(Player p) {
+        Party party = partyOf(p);
+        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dParty"));
+        if (party == null) {
+            inv.setItem(13, settingIcon(Material.CAKE, true, "&d&lCreate Party", List.of("&7Start a party and invite players", "&8You can't queue while in a party")));
+            Map<UUID, Long> mine = partyInvites.get(p.getUniqueId());
+            long now = System.currentTimeMillis();
+            int slot = 19;
+            if (mine != null) for (Map.Entry<UUID, Long> en : mine.entrySet()) {
+                if (en.getValue() < now || slot > 25) continue;
+                Player from = Bukkit.getPlayer(en.getKey());
+                if (from == null) continue;
+                inv.setItem(slot++, namedItem(Material.PAPER, "&a" + from.getName(), List.of("&7Party invite", "&8Click to accept")));
+            }
+        } else {
+            boolean leader = party.leader.equals(p.getUniqueId());
+            List<String> lore = new ArrayList<>();
+            for (UUID id : party.members) lore.add("&7- &f" + nameOf(id) + (id.equals(party.leader) ? " &6(leader)" : ""));
+            inv.setItem(10, namedItem(Material.PLAYER_HEAD, "&d&lMembers &8(&f" + party.members.size() + "&8/&f" + partyMaxSize() + "&8)", lore));
+            if (leader) {
+                inv.setItem(12, namedItem(Material.NAME_TAG, "&a&lInvite Player", List.of("&7Pick an online player to invite")));
+                inv.setItem(14, namedItem(Material.IRON_BOOTS, "&c&lKick Member", List.of("&7Remove a player from the party")));
+                inv.setItem(16, namedItem(Material.TNT, "&c&lDisband Party", List.of("&7Close the party for everyone")));
+                inv.setItem(22, namedItem(Material.OAK_DOOR, "&e&lLeave Party", List.of("&7Leadership passes to the next member")));
+            } else {
+                inv.setItem(16, namedItem(Material.OAK_DOOR, "&e&lLeave Party", List.of("&7Leave this party")));
+            }
+        }
+        p.openInventory(inv);
+    }
+    private ItemStack partyHead(Player who, String lore) {
+        ItemStack head = new ItemStack(Material.PLAYER_HEAD);
+        if (head.getItemMeta() instanceof org.bukkit.inventory.meta.SkullMeta sm) {
+            sm.setOwningPlayer(who);
+            sm.setDisplayName(c("&f" + who.getName()));
+            sm.setLore(List.of(c(lore)));
+            head.setItemMeta(sm);
+        }
+        return head;
+    }
+    private void openPartyInviteMenu(Player p) {
+        Party party = partyOf(p);
+        if (party == null || !party.leader.equals(p.getUniqueId())) { openParty(p); return; }
+        Inventory inv = Bukkit.createInventory(null, 54, c("&5&lAzurPvP &8» &dParty Invite"));
+        int slot = 0;
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            if (slot >= 45) break;
+            if (online.equals(p) || partyByPlayer.containsKey(online.getUniqueId()) || vanished.contains(online.getUniqueId())) continue;
+            inv.setItem(slot++, partyHead(online, "&7Click to invite"));
+        }
+        if (slot == 0) inv.setItem(22, namedItem(Material.BARRIER, "&cNo players to invite", List.of("&7Everyone online is already in a party")));
+        inv.setItem(49, namedItem(Material.ARROW, "&6← &fBack", List.of("&7Return to the party menu")));
+        p.openInventory(inv);
+    }
+    private void openPartyKickMenu(Player p) {
+        Party party = partyOf(p);
+        if (party == null || !party.leader.equals(p.getUniqueId())) { openParty(p); return; }
+        Inventory inv = Bukkit.createInventory(null, 54, c("&5&lAzurPvP &8» &dParty Kick"));
+        int slot = 0;
+        for (UUID id : party.members) {
+            Player member = Bukkit.getPlayer(id);
+            if (member == null || id.equals(party.leader) || slot >= 45) continue;
+            inv.setItem(slot++, partyHead(member, "&cClick to kick"));
+        }
+        if (slot == 0) inv.setItem(22, namedItem(Material.BARRIER, "&cNobody to kick", List.of("&7You are the only member")));
+        inv.setItem(49, namedItem(Material.ARROW, "&6← &fBack", List.of("&7Return to the party menu")));
+        p.openInventory(inv);
+    }
+    @EventHandler public void onPartyQuit(PlayerQuitEvent e) {
+        UUID id = e.getPlayer().getUniqueId();
+        removeFromParty(id, "quit");
+        partyInvites.remove(id);
+    }
+
     // ---------- Leaderboards ----------
     private record Board(String id, String title, Material icon, String label, String sql) {}
     private List<Board> boards() {
@@ -1952,6 +2267,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private boolean isDuelItem(ItemStack item) { return item!=null && item.getType()==Material.IRON_SWORD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && DUEL_ITEM_NAME.equals(item.getItemMeta().getDisplayName()); }
     private void giveDuelItem(Player p) {
+        // Players in a party can't queue, so their duel sword is taken away (and comes back when they leave).
+        if (partyByPlayer.containsKey(p.getUniqueId())) {
+            for (int i = 0; i < p.getInventory().getSize(); i++) if (isDuelItem(p.getInventory().getItem(i))) p.getInventory().setItem(i, null);
+            return;
+        }
         ItemStack sword = null;
         for (int i = 0; i < p.getInventory().getSize(); i++) {
             ItemStack item = p.getInventory().getItem(i);
@@ -1963,11 +2283,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler public void onDuelItemUse(PlayerInteractEvent e) {
         if (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK) {
             if (isSettingsItem(e.getItem())) { e.setCancelled(true); openSettings(e.getPlayer()); return; }
+            if (isPartyItem(e.getItem())) { e.setCancelled(true); openParty(e.getPlayer()); return; }
             if (isDuelItem(e.getItem())) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); return; }
             if (isKitEditor(e.getItem())) { e.setCancelled(true); openKitMenu(e.getPlayer(),"editor",null); }
         }
     }
-    @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isDuelItem(e.getItemDrop().getItemStack()) || isKitEditor(e.getItemDrop().getItemStack()) || isSettingsItem(e.getItemDrop().getItemStack()))e.setCancelled(true); }
+    @EventHandler public void onDuelItemDrop(PlayerDropItemEvent e) { if(isLobbyItem(e.getItemDrop().getItemStack()))e.setCancelled(true); }
     private void openRoundsInputMenu(Player p) {
         Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dSet Rounds"));
         inv.setItem(11, namedItem(Material.PAPER, "&d&lEnter Round Count", List.of("&7Click to type a number in chat", "&7Allowed: 1-99 rounds")));
@@ -1992,7 +2313,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @EventHandler public void onDuelInventoryClick(InventoryClickEvent e) {
         if(!(e.getWhoClicked() instanceof Player p))return;
-        if(isDuelItem(e.getCurrentItem()) || isDuelItem(e.getCursor()) || isKitEditor(e.getCurrentItem()) || isKitEditor(e.getCursor()) || isSettingsItem(e.getCurrentItem()) || isSettingsItem(e.getCursor())) { e.setCancelled(true); return; }
+        if(isLobbyItem(e.getCurrentItem()) || isLobbyItem(e.getCursor())) { e.setCancelled(true); return; }
         if (e.getClick() == org.bukkit.event.inventory.ClickType.NUMBER_KEY && (isLobbyItem(e.getView().getBottomInventory().getItem(e.getHotbarButton())) || isLobbyItem(e.getCurrentItem()))) { e.setCancelled(true); return; }
         if (e.getClick() == org.bukkit.event.inventory.ClickType.SWAP_OFFHAND && (isLobbyItem(e.getCurrentItem()) || isLobbyItem(p.getInventory().getItemInOffHand()))) { e.setCancelled(true); return; }
         if (e.getClick() == org.bukkit.event.inventory.ClickType.DROP || e.getClick() == org.bukkit.event.inventory.ClickType.CONTROL_DROP) { if (isLobbyItem(e.getCurrentItem())) { e.setCancelled(true); return; } }
@@ -2029,6 +2350,45 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         for (Board lbBoard : boards()) if (title.equals("AzurPvP » " + lbBoard.title())) {
             e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
             if (e.getSlot()==40) openLeaderboards(p);
+            return;
+        }
+        if (title.equals("AzurPvP » Party")) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            Party party = partyOf(p);
+            int clickedSlot = e.getSlot();
+            ItemStack clickedItem = e.getCurrentItem();
+            if (party == null) {
+                if (clickedSlot == 13) { p.closeInventory(); createParty(p); Bukkit.getScheduler().runTask(this, () -> { if (p.isOnline() && partyOf(p) != null) openParty(p); }); }
+                else if (clickedSlot >= 19 && clickedSlot <= 25 && clickedItem != null && clickedItem.getType() == Material.PAPER && clickedItem.hasItemMeta()) {
+                    String fromName = ChatColor.stripColor(clickedItem.getItemMeta().getDisplayName());
+                    p.closeInventory(); acceptPartyInvite(p, fromName);
+                    Bukkit.getScheduler().runTask(this, () -> { if (p.isOnline() && partyOf(p) != null) openParty(p); });
+                }
+                return;
+            }
+            boolean isLeader = party.leader.equals(p.getUniqueId());
+            if (clickedSlot == 16 && !isLeader) { p.closeInventory(); leaveParty(p); }
+            else if (isLeader && clickedSlot == 22) { p.closeInventory(); leaveParty(p); }
+            else if (isLeader && clickedSlot == 12) openPartyInviteMenu(p);
+            else if (isLeader && clickedSlot == 14) openPartyKickMenu(p);
+            else if (isLeader && clickedSlot == 16) { p.closeInventory(); disbandParty(party); }
+            return;
+        }
+        if (title.equals("AzurPvP » Party Invite") || title.equals("AzurPvP » Party Kick")) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            ItemStack clicked = e.getCurrentItem();
+            if (clicked == null) return;
+            if (clicked.getType() == Material.ARROW) { openParty(p); return; }
+            if (clicked.getType() == Material.PLAYER_HEAD && clicked.hasItemMeta()) {
+                String targetName = ChatColor.stripColor(clicked.getItemMeta().getDisplayName());
+                if (title.endsWith("Invite")) {
+                    Player target = Bukkit.getPlayerExact(targetName);
+                    if (target == null) tell(p, "&cThat player is no longer online."); else invitePlayer(p, target);
+                } else {
+                    kickFromParty(p, targetName);
+                    openPartyKickMenu(p);
+                }
+            }
             return;
         }
         if(title.startsWith("Editing:")) {
@@ -2094,7 +2454,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (isLobbyItem(e.getOldCursor())) { e.setCancelled(true); return; }
         String title = ChatColor.stripColor(e.getView().getTitle());
         if (title == null) return;
-        if (title.contains("Select a Kit") || title.contains("Kit Editor") || title.contains("Duel Settings")) {
+        if (title.contains("Select a Kit") || title.contains("Kit Editor") || title.contains("Duel Settings") || title.startsWith("AzurPvP » Party")) {
             e.setCancelled(true);
             return;
         }
@@ -2230,6 +2590,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(cmd.getName().equalsIgnoreCase("kit") && args.length==1){ List<String> choices=new ArrayList<>(List.of("create","delete","upload")); ConfigurationSection ks=getConfig().getConfigurationSection("kits"); if(ks!=null)choices.addAll(ks.getKeys(false)); return choices.stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList(); }
         if(cmd.getName().equalsIgnoreCase("kit") && args.length==2 && Set.of("delete","upload").contains(args[0].toLowerCase(Locale.ROOT))){ ConfigurationSection ks=getConfig().getConfigurationSection("kits"); return ks==null?Collections.emptyList():ks.getKeys(false).stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList(); }
+        if(cmd.getName().equalsIgnoreCase("party")) {
+            if (args.length == 1) return List.of("create","disband","invite","accept","deny","leave","kick","promote","list").stream().filter(v -> v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+            if (args.length == 2 && Set.of("invite","accept","deny","kick","promote").contains(args[0].toLowerCase(Locale.ROOT)))
+                return Bukkit.getOnlinePlayers().stream().map(Player::getName).filter(v -> v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
+        }
         return Collections.emptyList();
     }
 }
