@@ -391,63 +391,20 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private void openDatabase() throws SQLException {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
-        File file = new File(getDataFolder(), getConfig().getString("database.file", "players.db"));
+        File file = new File(getDataFolder(), "stats.db");
         db = DriverManager.getConnection("jdbc:sqlite:" + file.getAbsolutePath());
+        // One-time full stats reset the first time this version starts. Runs once, then never again.
+        if (!getConfig().getBoolean("migrations.stats-db-reset-v1", false)) {
+            try (Statement s = db.createStatement()) {
+                s.executeUpdate("DROP TABLE IF EXISTS stats");
+            }
+            getConfig().set("migrations.stats-db-reset-v1", true);
+            saveConfig();
+            getLogger().info("All stats were reset; now saving to stats.db");
+        }
         try (Statement s = db.createStatement()) {
             s.executeUpdate("CREATE TABLE IF NOT EXISTS stats (uuid TEXT PRIMARY KEY, name TEXT NOT NULL, kills INTEGER DEFAULT 0, deaths INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, playtime_seconds INTEGER DEFAULT 0)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, reporter TEXT, target TEXT, reason TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
-            s.executeUpdate("CREATE TABLE IF NOT EXISTS duel_history (id INTEGER PRIMARY KEY AUTOINCREMENT, winner_uuid TEXT NOT NULL, winner_name TEXT NOT NULL, loser_uuid TEXT NOT NULL, loser_name TEXT NOT NULL, kit TEXT NOT NULL, winner_score INTEGER NOT NULL, loser_score INTEGER NOT NULL, arena TEXT, ended_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
-            s.executeUpdate("CREATE TABLE IF NOT EXISTS duel_kit_stats (uuid TEXT NOT NULL, kit TEXT NOT NULL, wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0, PRIMARY KEY (uuid, kit))");
-            s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_duel_history_winner ON duel_history(winner_uuid)");
-            s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_duel_history_loser ON duel_history(loser_uuid)");
-        }
-        // SQLite has no "ADD COLUMN IF NOT EXISTS", so a failure here just means the column already exists.
-        for (String col : List.of("duel_wins", "duel_losses", "duel_streak", "best_duel_streak", "duel_rounds_won", "duel_rounds_lost")) {
-            try (Statement alter = db.createStatement()) {
-                alter.executeUpdate("ALTER TABLE stats ADD COLUMN " + col + " INTEGER DEFAULT 0");
-            } catch (SQLException ignored) {}
-        }
-    }
-
-    private void recordDuelResult(Player winner, Player loser, String kit, int winnerScore, int loserScore, String arena) {
-        ensurePlayer(winner); ensurePlayer(loser);
-        String w = winner.getUniqueId().toString(), l = loser.getUniqueId().toString();
-        try {
-            db.setAutoCommit(false);
-            try (PreparedStatement ps = db.prepareStatement(
-                    "UPDATE stats SET duel_wins=duel_wins+1, duel_streak=duel_streak+1, " +
-                    "best_duel_streak=MAX(best_duel_streak, duel_streak+1), " +
-                    "duel_rounds_won=duel_rounds_won+?, duel_rounds_lost=duel_rounds_lost+? WHERE uuid=?")) {
-                ps.setInt(1, winnerScore); ps.setInt(2, loserScore); ps.setString(3, w); ps.executeUpdate();
-            }
-            try (PreparedStatement ps = db.prepareStatement(
-                    "UPDATE stats SET duel_losses=duel_losses+1, duel_streak=0, " +
-                    "duel_rounds_won=duel_rounds_won+?, duel_rounds_lost=duel_rounds_lost+? WHERE uuid=?")) {
-                ps.setInt(1, loserScore); ps.setInt(2, winnerScore); ps.setString(3, l); ps.executeUpdate();
-            }
-            try (PreparedStatement ps = db.prepareStatement(
-                    "INSERT INTO duel_kit_stats(uuid,kit,wins,losses) VALUES(?,?,1,0) " +
-                    "ON CONFLICT(uuid,kit) DO UPDATE SET wins=wins+1")) {
-                ps.setString(1, w); ps.setString(2, kit); ps.executeUpdate();
-            }
-            try (PreparedStatement ps = db.prepareStatement(
-                    "INSERT INTO duel_kit_stats(uuid,kit,wins,losses) VALUES(?,?,0,1) " +
-                    "ON CONFLICT(uuid,kit) DO UPDATE SET losses=losses+1")) {
-                ps.setString(1, l); ps.setString(2, kit); ps.executeUpdate();
-            }
-            try (PreparedStatement ps = db.prepareStatement(
-                    "INSERT INTO duel_history(winner_uuid,winner_name,loser_uuid,loser_name,kit,winner_score,loser_score,arena) VALUES(?,?,?,?,?,?,?,?)")) {
-                ps.setString(1, w); ps.setString(2, winner.getName());
-                ps.setString(3, l); ps.setString(4, loser.getName());
-                ps.setString(5, kit); ps.setInt(6, winnerScore); ps.setInt(7, loserScore); ps.setString(8, arena);
-                ps.executeUpdate();
-            }
-            db.commit();
-        } catch (SQLException e) {
-            getLogger().warning("Could not record duel result: " + e.getMessage());
-            try { db.rollback(); } catch (SQLException ignored) {}
-        } finally {
-            try { db.setAutoCommit(true); } catch (SQLException ignored) {}
         }
     }
 
@@ -474,7 +431,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         } catch (SQLException e) { getLogger().warning("Stats write failed: " + e.getMessage()); }
     }
     private int getStat(UUID uuid, String field) {
-        if (!Set.of("kills","deaths","streak","best_streak","playtime_seconds","duel_wins","duel_losses","duel_streak","best_duel_streak","duel_rounds_won","duel_rounds_lost").contains(field)) return 0;
+        if (!Set.of("kills","deaths","streak","best_streak","playtime_seconds").contains(field)) return 0;
         try (PreparedStatement ps = db.prepareStatement("SELECT " + field + " FROM stats WHERE uuid=?")) {
             ps.setString(1, uuid.toString()); try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
         } catch (SQLException e) { return 0; }
@@ -697,7 +654,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     // normally; the player must manually place another totem in a hand to use it.
 
     @EventHandler public void onDeath(PlayerDeathEvent e) {
-        if (activeDuels.containsKey(e.getEntity().getUniqueId())) return; // duels are tracked separately
         Player victim=e.getEntity(); Player killer=victim.getKiller();
         stat(victim.getUniqueId(),"deaths",1); stat(victim.getUniqueId(),"streak",-getStat(victim.getUniqueId(),"streak"));
         if(killer!=null && !killer.equals(victim)) {
@@ -930,11 +886,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             int k=getStat(target.getUniqueId(),"kills"), d=getStat(target.getUniqueId(),"deaths");
             tell(s,"&dStats for &f"+(target.getName()==null?"Unknown":target.getName()));
             tell(s,"&7Kills: &d"+k+" &8| &7Deaths: &d"+d+" &8| &7KDR: &d"+String.format(Locale.US,"%.2f",d==0?k:(double)k/d));
-            tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak"));
-            int dw=getStat(target.getUniqueId(),"duel_wins"), dl=getStat(target.getUniqueId(),"duel_losses");
-            tell(s,"&7Duels: &d"+dw+"W &8/ &d"+dl+"L &8| &7WLR: &d"+String.format(Locale.US,"%.2f",dl==0?dw:(double)dw/dl));
-            tell(s,"&7Duel streak: &d"+getStat(target.getUniqueId(),"duel_streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_duel_streak"));
-            return true;
+            tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak")); return true;
         }
         if(n.equals("kit")) {
             if(!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
@@ -999,7 +951,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(n.equals("top")) {
             String field=a.length>0?a[0].toLowerCase(Locale.ROOT):"kills";
-            if(!Set.of("kills","deaths","best_streak","playtime_seconds","duel_wins","duel_losses","best_duel_streak").contains(field)) field="kills";
+            if(!Set.of("kills","deaths","best_streak","playtime_seconds").contains(field)) field="kills";
             tell(s,"&dTop players by "+field+":");
             try(Statement st=db.createStatement(); ResultSet rs=st.executeQuery("SELECT name,"+field+" FROM stats ORDER BY "+field+" DESC LIMIT 10")) { int i=1; while(rs.next()) tell(s,"&8"+(i++)+". &f"+rs.getString(1)+" &8— &d"+rs.getLong(2)); } catch(SQLException ex){tell(s,"&cCould not load leaderboard.");}
             return true;
@@ -1220,13 +1172,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private void finishDuel(Player winner,Player loser) {
         if(winner==null||loser==null)return;
-        // Guard: finishDuel can be reached twice (final round + quit). Only count a duel once.
-        if (!activeDuels.containsKey(winner.getUniqueId()) || !activeDuels.containsKey(loser.getUniqueId())) return;
-        String statArena = duelArenaByPlayer.get(winner.getUniqueId());
-        String statKit = normalizeKitName(duelChosenKits.getOrDefault(winner.getUniqueId(), "sword"));
-        int statWinnerScore = duelRoundWins.getOrDefault(winner.getUniqueId(), 0);
-        int statLoserScore = duelRoundWins.getOrDefault(loser.getUniqueId(), 0);
-        recordDuelResult(winner, loser, statKit, statWinnerScore, statLoserScore, statArena);
         String finishedArenaId = duelArenaByPlayer.get(winner.getUniqueId());
         if (finishedArenaId == null) finishedArenaId = duelArenaByPlayer.get(loser.getUniqueId());
         if (finishedArenaId != null) occupiedDuelArenas.remove(finishedArenaId);
