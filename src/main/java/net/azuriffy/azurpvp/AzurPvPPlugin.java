@@ -104,7 +104,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "cmode")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "cmode")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -408,6 +408,16 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         try (Statement s = db.createStatement()) {
             s.executeUpdate("CREATE TABLE IF NOT EXISTS stats (uuid TEXT PRIMARY KEY, name TEXT NOT NULL, kills INTEGER DEFAULT 0, deaths INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, playtime_seconds INTEGER DEFAULT 0)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, reporter TEXT, target TEXT, reason TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS duel_history (id INTEGER PRIMARY KEY AUTOINCREMENT, winner_uuid TEXT NOT NULL, winner_name TEXT NOT NULL, loser_uuid TEXT NOT NULL, loser_name TEXT NOT NULL, kit TEXT NOT NULL, winner_score INTEGER NOT NULL, loser_score INTEGER NOT NULL, arena TEXT, ended_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+        }
+        // SQLite has no "ADD COLUMN IF NOT EXISTS": a failure just means the column is already there.
+        for (String col : List.of("duel_wins INTEGER DEFAULT 0", "duel_losses INTEGER DEFAULT 0", "duel_streak INTEGER DEFAULT 0", "best_duel_streak INTEGER DEFAULT 0", "elo INTEGER DEFAULT 1000")) {
+            try (Statement alter = db.createStatement()) { alter.executeUpdate("ALTER TABLE stats ADD COLUMN " + col); } catch (SQLException ignored) {}
+        }
+        try (Statement st = db.createStatement(); ResultSet rs = st.executeQuery("PRAGMA table_info(stats)")) {
+            StringBuilder sb = new StringBuilder();
+            while (rs.next()) sb.append(rs.getString("name")).append(' ');
+            getLogger().info("[DuelStats] stats columns: " + sb);
         }
     }
 
@@ -421,6 +431,36 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private String c(String s) { return ChatColor.translateAlternateColorCodes('&', s); }
     private String prefix() { return c(getConfig().getString("prefix", "&8[&5AzurPvP&8] &r")); }
     private void tell(CommandSender sender, String message) { sender.sendMessage(prefix() + c(message)); }
+    private void recordDuelResult(Player winner, Player loser, String kit, int winnerScore, int loserScore, String arena) {
+        ensurePlayer(winner); ensurePlayer(loser);
+        String w = winner.getUniqueId().toString(), l = loser.getUniqueId().toString();
+        try {
+            db.setAutoCommit(false);
+            int wElo = getStat(winner.getUniqueId(), "elo"), lElo = getStat(loser.getUniqueId(), "elo");
+            if (wElo <= 0) wElo = 1000; if (lElo <= 0) lElo = 1000;
+            int delta = (int) Math.round(32 * (1.0 - 1.0 / (1.0 + Math.pow(10, (lElo - wElo) / 400.0))));
+            try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET duel_wins=duel_wins+1, duel_streak=duel_streak+1, best_duel_streak=MAX(best_duel_streak, duel_streak+1), elo=? WHERE uuid=?")) {
+                ps.setInt(1, wElo + delta); ps.setString(2, w);
+                if (ps.executeUpdate() == 0) getLogger().warning("[DuelStats] No stats row for winner " + winner.getName());
+            }
+            try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET duel_losses=duel_losses+1, duel_streak=0, elo=? WHERE uuid=?")) {
+                ps.setInt(1, Math.max(0, lElo - delta)); ps.setString(2, l);
+                if (ps.executeUpdate() == 0) getLogger().warning("[DuelStats] No stats row for loser " + loser.getName());
+            }
+            try (PreparedStatement ps = db.prepareStatement("INSERT INTO duel_history(winner_uuid,winner_name,loser_uuid,loser_name,kit,winner_score,loser_score,arena) VALUES(?,?,?,?,?,?,?,?)")) {
+                ps.setString(1, w); ps.setString(2, winner.getName()); ps.setString(3, l); ps.setString(4, loser.getName());
+                ps.setString(5, kit); ps.setInt(6, winnerScore); ps.setInt(7, loserScore); ps.setString(8, arena);
+                ps.executeUpdate();
+            }
+            db.commit();
+            getLogger().info("[DuelStats] Saved duel: " + winner.getName() + " beat " + loser.getName() + " " + winnerScore + "-" + loserScore + " (kit " + kit + ", elo " + wElo + "->" + (wElo + delta) + ")");
+        } catch (SQLException e) {
+            getLogger().warning("[DuelStats] Could not record duel result: " + e.getMessage());
+            try { db.rollback(); } catch (SQLException ignored) {}
+        } finally {
+            try { db.setAutoCommit(true); } catch (SQLException ignored) {}
+        }
+    }
     private void ensurePlayer(Player p) {
         try (PreparedStatement ps = db.prepareStatement("INSERT OR IGNORE INTO stats(uuid,name) VALUES(?,?)")) {
             ps.setString(1, p.getUniqueId().toString()); ps.setString(2, p.getName()); ps.executeUpdate();
@@ -434,7 +474,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         } catch (SQLException e) { getLogger().warning("Stats write failed: " + e.getMessage()); }
     }
     private int getStat(UUID uuid, String field) {
-        if (!Set.of("kills","deaths","streak","best_streak","playtime_seconds").contains(field)) return 0;
+        if (!Set.of("kills","deaths","streak","best_streak","playtime_seconds","duel_wins","duel_losses","duel_streak","best_duel_streak","elo").contains(field)) return 0;
         try (PreparedStatement ps = db.prepareStatement("SELECT " + field + " FROM stats WHERE uuid=?")) {
             ps.setString(1, uuid.toString()); try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
         } catch (SQLException e) { return 0; }
@@ -657,6 +697,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     // normally; the player must manually place another totem in a hand to use it.
 
     @EventHandler public void onDeath(PlayerDeathEvent e) {
+        if (activeDuels.containsKey(e.getEntity().getUniqueId())) return; // duels are tracked separately
         Player victim=e.getEntity(); Player killer=victim.getKiller();
         stat(victim.getUniqueId(),"deaths",1); stat(victim.getUniqueId(),"streak",-getStat(victim.getUniqueId(),"streak"));
         if(killer!=null && !killer.equals(victim)) {
@@ -757,7 +798,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("role")) { roleCommand(s,a); return true; }
         if(n.equals("help")) {
             tell(s, "&d&lAzurPvP Commands &8— &7private help");
-            tell(s, "&7Players: &f/spawn, /stats, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report, /spectate, /leave");
+            tell(s, "&7Players: &f/spawn, /stats, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report, /spectate, /leave, /leaderboard");
             if (can(s,"staff")) tell(s, "&aStaff: &f/fly, /vanish, /freeze, /staffchat, /whois, /announce");
             if (can(s,"moderation")) tell(s, "&cModeration: &f/ban, /tempban, /unban, /kick, /mute, /unmute, /warn, /history, /heal, /feed, /gamemode, /speed, /clear, /repair");
             if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup, /arena");
@@ -778,6 +819,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(!(s instanceof Player p))return true;
             if(!spectating.containsKey(p.getUniqueId())){tell(p,"&cYou are not spectating anyone.");return true;}
             stopSpectating(p,"&dYou left spectator mode."); return true;
+        }
+        if(n.equals("leaderboard")) {
+            if(!(s instanceof Player p)){tell(s,"&cPlayers only.");return true;}
+            if(a.length>=1){
+                String want=a[0].toLowerCase(Locale.ROOT);
+                for(Board b:boards()) if(b.id().equals(want)){openBoard(p,b);return true;}
+                tell(p,"&cUnknown leaderboard. Options: &f"+String.join(", ",boards().stream().map(Board::id).toList()));return true;
+            }
+            openLeaderboards(p); return true;
         }
         if(n.equals("azurpvp")) { tell(s,"&dAzurPvP Utils &8— &fPaper 1.21.11"); tell(s,"&7Use &d/help &7to privately view the commands available to your role."); return true; }
         if(n.equals("world")) {
@@ -907,7 +957,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             int k=getStat(target.getUniqueId(),"kills"), d=getStat(target.getUniqueId(),"deaths");
             tell(s,"&dStats for &f"+(target.getName()==null?"Unknown":target.getName()));
             tell(s,"&7Kills: &d"+k+" &8| &7Deaths: &d"+d+" &8| &7KDR: &d"+String.format(Locale.US,"%.2f",d==0?k:(double)k/d));
-            tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak")); return true;
+            tell(s,"&7Streak: &d"+getStat(target.getUniqueId(),"streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_streak"));
+            int dw=getStat(target.getUniqueId(),"duel_wins"), dl=getStat(target.getUniqueId(),"duel_losses");
+            tell(s,"&7Duels: &d"+dw+"W &8/ &d"+dl+"L &8| &7WLR: &d"+String.format(Locale.US,"%.2f",dl==0?dw:(double)dw/dl)+" &8| &7Elo: &d"+getStat(target.getUniqueId(),"elo"));
+            tell(s,"&7Duel streak: &d"+getStat(target.getUniqueId(),"duel_streak")+" &8| &7Best: &d"+getStat(target.getUniqueId(),"best_duel_streak"));
+            return true;
         }
         if(n.equals("kit")) {
             if(!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
@@ -1196,6 +1250,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private void finishDuel(Player winner,Player loser) {
         if(winner==null||loser==null)return;
+        // Record the result once (finishDuel can be reached twice, e.g. final round + quit).
+        if (activeDuels.containsKey(winner.getUniqueId()) && activeDuels.containsKey(loser.getUniqueId())) {
+            try {
+                recordDuelResult(winner, loser, normalizeKitName(duelChosenKits.getOrDefault(winner.getUniqueId(), "sword")),
+                    duelRoundWins.getOrDefault(winner.getUniqueId(), 0), duelRoundWins.getOrDefault(loser.getUniqueId(), 0), duelArenaByPlayer.get(winner.getUniqueId()));
+            } catch (Throwable t) { getLogger().severe("[DuelStats] recordDuelResult crashed: " + t); t.printStackTrace(); }
+        } else getLogger().warning("[DuelStats] finishDuel skipped recording (duel already finished): " + winner.getName() + " vs " + loser.getName());
         String finishedArenaId = duelArenaByPlayer.get(winner.getUniqueId());
         if (finishedArenaId == null) finishedArenaId = duelArenaByPlayer.get(loser.getUniqueId());
         if (finishedArenaId != null) occupiedDuelArenas.remove(finishedArenaId);
@@ -1398,30 +1459,30 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private static final List<String> SETTING_CATEGORIES = List.of("matches", "visuals", "chat", "social");
     private static final List<SettingDef> SETTINGS = List.of(
         // Matches
-        cyc("ping_range", "Ping Range", "matches", List.of("No Limit", "50ms", "100ms", "150ms", "200ms"), "No Limit", Material.CLOCK, "Only get queued against players whose ping is within this limit"),
-        tgl("allow_spectators", "Allow Spectators", "matches", true, Material.LIME_DYE, "Let other players /spectate your matches"),
-        tgl("spectator_alerts", "Spectator Alerts", "matches", true, Material.LIME_DYE, "Get a message when someone starts or stops spectating your match"),
-        tgl("see_other_spectators", "See Other Spectators", "matches", false, Material.LIME_DYE, "While spectating, see other spectators"),
-        tgl("auto_gg", "Auto GG", "matches", false, Material.LIME_DYE, "Automatically say gg when a duel ends"),
-        tgl("duel_titles", "Duel Titles", "matches", true, Material.LIME_DYE, "Countdown, round and result titles"),
-        tgl("round_messages", "Round Messages", "matches", true, Material.LIME_DYE, "Round won/lost chat messages"),
-        tgl("duel_sounds", "Duel Sounds", "matches", true, Material.LIME_DYE, "Countdown and duel result sounds"),
-        tgl("queue_sounds", "Queue Sounds", "matches", false, Material.LIME_DYE, "Queue confirmation sounds"),
+        cyc("ping_range", "Ping Range", "matches", List.of("No Limit", "50ms", "100ms", "150ms", "200ms"), "No Limit", Material.COMPASS, "Only get queued against players whose ping is within this limit"),
+        tgl("allow_spectators", "Allow Spectators", "matches", true, Material.ENDER_EYE, "Let other players /spectate your matches"),
+        tgl("spectator_alerts", "Spectator Alerts", "matches", true, Material.BELL, "Get a message when someone starts or stops spectating your match"),
+        tgl("see_other_spectators", "See Other Spectators", "matches", false, Material.SPYGLASS, "While spectating, see other spectators"),
+        tgl("auto_gg", "Auto GG", "matches", false, Material.NAME_TAG, "Automatically say gg when a duel ends"),
+        tgl("duel_titles", "Duel Titles", "matches", true, Material.PAPER, "Countdown, round and result titles"),
+        tgl("round_messages", "Round Messages", "matches", true, Material.BOOK, "Round won/lost chat messages"),
+        tgl("duel_sounds", "Duel Sounds", "matches", true, Material.NOTE_BLOCK, "Countdown and duel result sounds"),
+        tgl("queue_sounds", "Queue Sounds", "matches", false, Material.GOAT_HORN, "Queue confirmation sounds"),
         // Visuals
-        tgl("scoreboard", "Scoreboard", "visuals", true, Material.LIME_DYE, "Show your personal sidebar"),
-        tgl("tab_info", "Tab Info", "visuals", true, Material.LIME_DYE, "Custom tab header and footer"),
-        tgl("kill_effects", "Kill Effects", "visuals", true, Material.LIME_DYE, "Particle burst when you win a round"),
-        tgl("lobby_players", "Lobby Players", "visuals", true, Material.LIME_DYE, "Show other players while you are in the lobby"),
+        tgl("scoreboard", "Scoreboard", "visuals", true, Material.ITEM_FRAME, "Show your personal sidebar"),
+        tgl("tab_info", "Tab Info", "visuals", true, Material.PAINTING, "Custom tab header and footer"),
+        tgl("kill_effects", "Kill Effects", "visuals", true, Material.BLAZE_POWDER, "Particle burst when you win a round"),
+        tgl("lobby_players", "Lobby Players", "visuals", true, Material.PLAYER_HEAD, "Show other players while you are in the lobby"),
         cyc("preferred_time", "Preferred Time", "visuals", List.of("Server", "Sunrise", "Noon", "Sunset", "Midnight"), "Server", Material.CLOCK, "Your own time of day (only you see it)"),
         // Chat
-        tgl("public_chat", "Public Chat", "chat", true, Material.LIME_DYE, "Receive public chat messages"),
-        tgl("lobby_tips", "Lobby Tips", "chat", true, Material.LIME_DYE, "Occasional tips while you are in the lobby"),
-        tgl("family_friendly", "Family Friendly Chat", "chat", false, Material.LIME_DYE, "Censor swear words in chat you receive"),
-        tgl("message_sounds", "Message Sounds", "chat", false, Material.LIME_DYE, "Sound when you receive a private message"),
+        tgl("public_chat", "Public Chat", "chat", true, Material.OAK_SIGN, "Receive public chat messages"),
+        tgl("lobby_tips", "Lobby Tips", "chat", true, Material.LANTERN, "Occasional tips while you are in the lobby"),
+        tgl("family_friendly", "Family Friendly Chat", "chat", false, Material.MILK_BUCKET, "Censor swear words in chat you receive"),
+        tgl("message_sounds", "Message Sounds", "chat", false, Material.JUKEBOX, "Sound when you receive a private message"),
         cyc("match_chat", "Match Chat", "chat", List.of("Everyone", "Duel Only", "Off"), "Everyone", Material.WRITABLE_BOOK, "Whose chat you see while you are in a duel"),
         // Social & Privacy
-        cyc("duel_requests", "Duel Requests", "social", List.of("On", "Off"), "On", Material.CLOCK, "Allow other players to challenge you"),
-        cyc("private_messages", "Private Messages", "social", List.of("On", "Off"), "On", Material.CLOCK, "Allow other players to /msg you (staff can always message you)")
+        cyc("duel_requests", "Duel Requests", "social", List.of("On", "Off"), "On", Material.IRON_SWORD, "Allow other players to challenge you"),
+        cyc("private_messages", "Private Messages", "social", List.of("On", "Off"), "On", Material.FEATHER, "Allow other players to /msg you (staff can always message you)")
     );
     private SettingDef settingDef(String key) { for (SettingDef d : SETTINGS) if (d.key().equals(key)) return d; return null; }
     private List<SettingDef> settingsIn(String category) { return SETTINGS.stream().filter(d -> d.category().equals(category)).toList(); }
@@ -1455,13 +1516,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             SettingDef d = defs.get(i);
             if (d.isToggle()) {
                 boolean on = playerSetting(p, d.key(), Boolean.parseBoolean(d.def()));
-                inv.setItem(settingSlot(i), namedItem(on ? Material.LIME_DYE : Material.GRAY_DYE, (on ? "&a✔ &f" : "&c✖ &7") + d.label(), List.of("&7" + d.lore(), "", "&8Click to toggle")));
+                inv.setItem(settingSlot(i), settingIcon(d.icon(), on, (on ? "&a✔ &f" : "&c✖ &7") + d.label(), List.of("&7" + d.lore(), "", on ? "&aEnabled" : "&cDisabled", "&8Click to toggle")));
             } else {
                 inv.setItem(settingSlot(i), namedItem(d.icon(), "&6⇄ &f" + d.label() + ": &e" + settingString(p, d.key()), List.of("&7" + d.lore(), "", "&8Click to change")));
             }
         }
         inv.setItem(settingBackSlot(defs.size()), namedItem(Material.ARROW, "&6← &fBack", List.of("&7Return to settings")));
         p.openInventory(inv);
+    }
+    private ItemStack settingIcon(Material m, boolean glow, String name, List<String> lore) {
+        ItemStack it = namedItem(m, name, lore);
+        if (glow) { ItemMeta meta = it.getItemMeta(); if (meta != null) { meta.setEnchantmentGlintOverride(true); it.setItemMeta(meta); } }
+        return it;
     }
     private void cyclePlayerSetting(Player p, SettingDef d) {
         List<String> opts = d.options();
@@ -1614,6 +1680,52 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (root.equals("spawn")) { e.setCancelled(true); stopSpectating(p, "&dYou left spectator mode."); }
         else if (root.equals("duel") || root.equals("accept")) { e.setCancelled(true); tell(p, "&cUse &f/leave &cfirst."); }
     }
+
+    // ---------- Leaderboards ----------
+    private record Board(String id, String title, Material icon, String label, String sql) {}
+    private List<Board> boards() {
+        int minDuels = Math.max(1, getConfig().getInt("leaderboard.min-duels-for-win-rate", 5));
+        return List.of(
+            new Board("ranked", "Ranked Leaderboards", Material.NETHERITE_SWORD, "Elo", "SELECT uuid,name,elo AS v FROM stats WHERE duel_wins+duel_losses>0 ORDER BY elo DESC, duel_wins DESC LIMIT 10"),
+            new Board("wins", "Top Wins", Material.DIAMOND_SWORD, "Wins", "SELECT uuid,name,duel_wins AS v FROM stats WHERE duel_wins>0 ORDER BY duel_wins DESC LIMIT 10"),
+            new Board("winrate", "Top Win Rate", Material.GOLDEN_APPLE, "Win rate", "SELECT uuid,name,ROUND(duel_wins*100.0/(duel_wins+duel_losses),1) AS v FROM stats WHERE duel_wins+duel_losses>=" + minDuels + " ORDER BY v DESC, duel_wins DESC LIMIT 10"),
+            new Board("winstreaks", "Top Win Streaks", Material.BLAZE_POWDER, "Best win streak", "SELECT uuid,name,best_duel_streak AS v FROM stats WHERE best_duel_streak>0 ORDER BY best_duel_streak DESC LIMIT 10"),
+            new Board("kills", "Top Kills", Material.IRON_SWORD, "Kills", "SELECT uuid,name,kills AS v FROM stats WHERE kills>0 ORDER BY kills DESC LIMIT 10"),
+            new Board("killstreaks", "Top Kill Streaks", Material.TNT, "Best kill streak", "SELECT uuid,name,best_streak AS v FROM stats WHERE best_streak>0 ORDER BY best_streak DESC LIMIT 10")
+        );
+    }
+    private void openLeaderboards(Player p) {
+        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dLeaderboards"));
+        List<Board> list = boards();
+        for (int i = 0; i < list.size(); i++) inv.setItem(10 + i, namedItem(list.get(i).icon(), "&d&l" + list.get(i).title(), List.of("&7Click to view the top 10")));
+        inv.setItem(22, namedItem(Material.BARRIER, "&cClose", List.of("&7Close leaderboards")));
+        p.openInventory(inv);
+    }
+    private void openBoard(Player p, Board b) {
+        Inventory inv = Bukkit.createInventory(null, 45, c("&5&lAzurPvP &8» &d" + b.title()));
+        int[] slots = {11, 12, 13, 14, 15, 20, 21, 22, 23, 24};
+        int rank = 0;
+        try (Statement st = db.createStatement(); ResultSet rs = st.executeQuery(b.sql())) {
+            while (rs.next() && rank < slots.length) {
+                String uuid = rs.getString("uuid"), name = rs.getString("name");
+                double v = rs.getDouble("v");
+                String value = b.id().equals("winrate") ? String.format(Locale.US, "%.1f%%", v) : String.valueOf((long) v);
+                ItemStack head = new ItemStack(Material.PLAYER_HEAD);
+                ItemMeta meta = head.getItemMeta();
+                if (meta instanceof org.bukkit.inventory.meta.SkullMeta sm) {
+                    try { sm.setOwningPlayer(Bukkit.getOfflinePlayer(UUID.fromString(uuid))); } catch (IllegalArgumentException ignored) {}
+                    String color = rank == 0 ? "&6" : rank == 1 ? "&f" : rank == 2 ? "&c" : "&7";
+                    sm.setDisplayName(c(color + "#" + (rank + 1) + " &f" + name));
+                    sm.setLore(List.of(c("&7" + b.label() + ": &d" + value)));
+                    head.setItemMeta(sm);
+                }
+                inv.setItem(slots[rank++], head);
+            }
+        } catch (SQLException e) { getLogger().warning("Leaderboard query failed: " + e.getMessage()); }
+        if (rank == 0) inv.setItem(22, namedItem(Material.BARRIER, "&cNo data yet", List.of("&7Nobody is on this leaderboard yet")));
+        inv.setItem(40, namedItem(Material.ARROW, "&6← &fBack", List.of("&7Return to leaderboards")));
+        p.openInventory(inv);
+    }
     private void startLobbyTips() {
         long interval = Math.max(30L, getConfig().getLong("tips.interval-seconds", 300L)) * 20L;
         Bukkit.getScheduler().runTaskTimer(this, () -> {
@@ -1705,6 +1817,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 openSettingsCategory(p, settingsCategory);
                 return;
             }
+            return;
+        }
+        if (title.equals("AzurPvP » Leaderboards")) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            if (e.getSlot()==22) { p.closeInventory(); return; }
+            List<Board> list = boards();
+            if (e.getSlot()>=10 && e.getSlot()-10<list.size()) openBoard(p, list.get(e.getSlot()-10));
+            return;
+        }
+        for (Board lbBoard : boards()) if (title.equals("AzurPvP » " + lbBoard.title())) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            if (e.getSlot()==40) openLeaderboards(p);
             return;
         }
         if(title.startsWith("Editing:")) {
@@ -1884,6 +2008,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     @Override public List<String> onTabComplete(CommandSender s, Command cmd, String alias, String[] args) {
+        if(args.length==1 && cmd.getName().equalsIgnoreCase("leaderboard")) return boards().stream().map(Board::id).filter(v->v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         if(args.length==1 && Set.of("duel","accept","msg","reply","ignore","heal","feed","freeze","stats").contains(cmd.getName().toLowerCase(Locale.ROOT)))
             return Bukkit.getOnlinePlayers().stream().map(Player::getName).filter(n->n.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         if(cmd.getName().equalsIgnoreCase("tp")) {
