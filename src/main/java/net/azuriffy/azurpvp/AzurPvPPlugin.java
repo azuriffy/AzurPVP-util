@@ -66,6 +66,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Map<UUID, String> duelMaps = new ConcurrentHashMap<>();
     private final Map<UUID, String> duelGuiMode = new ConcurrentHashMap<>();
     private final Map<UUID, UUID> activeDuels = new ConcurrentHashMap<>();
+    private final Map<UUID, UUID> spectating = new ConcurrentHashMap<>(); // spectator -> duelist being watched
     private final LinkedHashMap<UUID, LinkedHashMap<String, Long>> duelQueue = new LinkedHashMap<>();
     private final Set<UUID> duelCountdown = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingDuelLosers = ConcurrentHashMap.newKeySet();
@@ -103,11 +104,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         ensureDefaultKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "cmode")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "cmode")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
         getServer().getPluginManager().registerEvents(this, this);
+        startLobbyTips();
+        startSpectatorWatch();
         combatTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
             updateCombat(); updateQueueActionBars();
             for (Player online : Bukkit.getOnlinePlayers()) {
@@ -720,8 +723,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         UUID id = lastMessaged.get(p.getUniqueId());
         Player to = id == null ? null : Bukkit.getPlayer(id);
         if (to == null) { tell(p, "&cNobody to reply to."); return; }
+        if (!isStaff(p) && settingString(to, "private_messages").equals("Off")) { tell(p, "&cThat player has private messages turned off."); return; }
         tell(p, "&dTo " + to.getName() + ": &f" + message);
         tell(to, "&dFrom " + p.getName() + ": &f" + message);
+        messageSound(to);
         lastMessaged.put(to.getUniqueId(), p.getUniqueId());
     }
 
@@ -752,11 +757,27 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("role")) { roleCommand(s,a); return true; }
         if(n.equals("help")) {
             tell(s, "&d&lAzurPvP Commands &8— &7private help");
-            tell(s, "&7Players: &f/spawn, /stats, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report");
+            tell(s, "&7Players: &f/spawn, /stats, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report, /spectate, /leave");
             if (can(s,"staff")) tell(s, "&aStaff: &f/fly, /vanish, /freeze, /staffchat, /whois, /announce");
             if (can(s,"moderation")) tell(s, "&cModeration: &f/ban, /tempban, /unban, /kick, /mute, /unmute, /warn, /history, /heal, /feed, /gamemode, /speed, /clear, /repair");
             if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup, /arena");
             return true;
+        }
+        if(n.equals("spectate")) {
+            if(!(s instanceof Player p)){tell(s,"&cPlayers only.");return true;}
+            if(a.length<1){tell(p,"&cUsage: /spectate <player>");return true;}
+            Player target=Bukkit.getPlayerExact(a[0]);
+            if(target==null||!activeDuels.containsKey(target.getUniqueId())){tell(p,"&cThis player is not in a match.");return true;}
+            if(activeDuels.containsKey(p.getUniqueId())){tell(p,"&cYou can't spectate while you are in a match.");return true;}
+            if(tagged(p)){tell(p,"&cYou can't spectate while combat-tagged.");return true;}
+            Player opp=Bukkit.getPlayer(activeDuels.get(target.getUniqueId()));
+            if(!isStaff(p)&&(!playerSetting(target,"allow_spectators",true)||(opp!=null&&!playerSetting(opp,"allow_spectators",true)))){tell(p,"&cThis player does not allow spectators.");return true;}
+            startSpectating(p,target); return true;
+        }
+        if(n.equals("leave")) {
+            if(!(s instanceof Player p))return true;
+            if(!spectating.containsKey(p.getUniqueId())){tell(p,"&cYou are not spectating anyone.");return true;}
+            stopSpectating(p,"&dYou left spectator mode."); return true;
         }
         if(n.equals("azurpvp")) { tell(s,"&dAzurPvP Utils &8— &fPaper 1.21.11"); tell(s,"&7Use &d/help &7to privately view the commands available to your role."); return true; }
         if(n.equals("world")) {
@@ -932,6 +953,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("duel")) {
             if(!(s instanceof Player p)||a.length<1){tell(s,"Use /duel <player>");return true;} Player target=Bukkit.getPlayerExact(a[0]);
             if(target==null||target.equals(p)){tell(p,"&cPlayer not found or invalid.");return true;}
+            if(!isStaff(p) && settingString(target,"duel_requests").equals("Off")){tell(p,"&c"+target.getName()+" is not accepting duel requests.");return true;}
             duelTargets.put(p.getUniqueId(),target.getName()); duelGuiMode.put(p.getUniqueId(),"challenge"); openKitMenu(p,"duel",target.getName()); return true;
         }
         if(n.equals("accept")) {
@@ -942,7 +964,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("msg")) {
             if(a.length<2){tell(s,"Use /msg <player> <message>");return true;} Player to=Bukkit.getPlayerExact(a[0]);if(to==null){tell(s,"&cPlayer not found.");return true;}
             String msg=String.join(" ",Arrays.copyOfRange(a,1,a.length)); if(s instanceof Player from && ignored.getOrDefault(to.getUniqueId(),Set.of()).contains(from.getUniqueId())){tell(s,"&cThat player is ignoring you.");return true;}
-            tell(s,"&dTo "+to.getName()+": &f"+msg);tell(to,"&dFrom "+s.getName()+": &f"+msg);if(s instanceof Player from)lastMessaged.put(to.getUniqueId(),from.getUniqueId());if(s instanceof Player from)lastMessaged.put(from.getUniqueId(),to.getUniqueId());return true;
+            if(s instanceof Player sender0 && !isStaff(sender0) && settingString(to,"private_messages").equals("Off")){tell(s,"&cThat player has private messages turned off.");return true;} tell(s,"&dTo "+to.getName()+": &f"+msg);tell(to,"&dFrom "+s.getName()+": &f"+msg);messageSound(to);if(s instanceof Player from)lastMessaged.put(to.getUniqueId(),from.getUniqueId());if(s instanceof Player from)lastMessaged.put(from.getUniqueId(),to.getUniqueId());return true;
         }
         if(n.equals("reply")) { if(!(s instanceof Player p)||a.length<1)return true; replyToLast(p, String.join(" ", a)); return true; }
         if(n.equals("ignore")) {
@@ -1008,6 +1030,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private void queueForDuel(Player player, String kit) {
         UUID playerId = player.getUniqueId();
         if (activeDuels.containsKey(playerId)) { tell(player, "&cYou are already in a duel."); return; }
+        if (spectating.containsKey(playerId)) { tell(player, "&cUse &f/leave &cbefore queueing."); return; }
         String normalizedKit = normalizeKitName(kit);
         LinkedHashMap<String, Long> playerKits = duelQueue.computeIfAbsent(playerId, ignored -> new LinkedHashMap<>());
         if (playerKits.containsKey(normalizedKit)) {
@@ -1028,7 +1051,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (candidateId.equals(playerId) || activeDuels.containsKey(candidateId)) continue;
             Player candidate = Bukkit.getPlayer(candidateId);
             if (candidate == null || !candidate.isOnline()) { duelQueue.remove(candidateId); continue; }
-            if (entry.getValue().containsKey(normalizedKit)) {
+            if (entry.getValue().containsKey(normalizedKit) && pingCompatible(player, candidate)) {
                 opponent = candidate;
                 matchedKit = normalizedKit;
                 break;
@@ -1063,7 +1086,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 LinkedHashMap<String, Long> secondKits = duelQueue.get(secondId);
                 if (second == null || secondKits == null) continue;
                 String common = firstKits.keySet().stream().filter(secondKits::containsKey).findFirst().orElse(null);
-                if (common == null) continue;
+                if (common == null || !pingCompatible(first, second)) continue;
                 duelChosenKits.put(firstId, common);
                 duelChosenKits.put(secondId, common);
                 if (startDuel(first, second)) {
@@ -1129,6 +1152,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         duelRoundWins.put(first.getUniqueId(), 0); duelRoundWins.put(second.getUniqueId(), 0);
         occupiedDuelArenas.add(selectedArena);
         activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),selectedArena);duelArenaByPlayer.put(second.getUniqueId(),selectedArena); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
+        refreshAllLobbyVisibility();
         first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
         tell(first,"&aDuel accepted: &f"+second.getName()+"&a!"); tell(second,"&aDuel accepted: &f"+first.getName()+"&a!");
         if (playerSetting(first, "duel_sounds", true)) first.playSound(first.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
@@ -1177,7 +1201,20 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (finishedArenaId != null) occupiedDuelArenas.remove(finishedArenaId);
         final String arenaToClean = finishedArenaId;
         activeDuels.remove(winner.getUniqueId());activeDuels.remove(loser.getUniqueId()); duelRoundWins.remove(winner.getUniqueId()); duelRoundWins.remove(loser.getUniqueId());arenaCombat.remove(winner.getUniqueId());arenaCombat.remove(loser.getUniqueId());combatUntil.remove(winner.getUniqueId());combatUntil.remove(loser.getUniqueId());duelCountdown.remove(winner.getUniqueId());duelCountdown.remove(loser.getUniqueId());duelArenaByPlayer.remove(winner.getUniqueId());duelArenaByPlayer.remove(loser.getUniqueId());
-        winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
+        if(playerSetting(winner,"duel_titles",true))winner.sendTitle(c("&a&lVICTORY"),c("&7You won the duel!"),0,100,0);if(playerSetting(loser,"duel_titles",true))loser.sendTitle(c("&c&lDEFEAT"),c("&7Returning to spawn soon..."),0,100,0);
+        Bukkit.getScheduler().runTask(this, this::refreshAllLobbyVisibility);
+        for (Map.Entry<UUID, UUID> en : new ArrayList<>(spectating.entrySet())) {
+            if (!en.getValue().equals(winner.getUniqueId()) && !en.getValue().equals(loser.getUniqueId())) continue;
+            Player sp = Bukkit.getPlayer(en.getKey());
+            if (sp == null) continue;
+            tell(sp, "&dThe match has ended. Returning to the lobby in 5 seconds...");
+            final UUID spId = en.getKey(), tId = en.getValue();
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                Player again = Bukkit.getPlayer(spId);
+                if (again != null && tId.equals(spectating.get(spId))) stopSpectating(again, "&dReturned to the lobby.");
+            }, 100L);
+        }
+        Bukkit.getScheduler().runTaskLater(this, () -> { for (Player gg : List.of(winner, loser)) if (gg.isOnline() && playerSetting(gg, "auto_gg", false)) gg.chat("gg"); }, 20L);
         if (winner.isOnline() && playerSetting(winner, "duel_sounds", true)) winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.2f);
         if (loser.isOnline() && playerSetting(loser, "duel_sounds", true)) loser.playSound(loser.getLocation(), org.bukkit.Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
         pendingDuelLosers.add(loser.getUniqueId());if(loser.isOnline()&&!loser.isDead())loser.setGameMode(GameMode.SPECTATOR);
@@ -1352,32 +1389,242 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private boolean playerSetting(Player p, String key, boolean fallback) { return getConfig().getBoolean("player-settings." + p.getUniqueId() + "." + key, fallback); }
     private void setPlayerSetting(Player p, String key, boolean value) { getConfig().set("player-settings." + p.getUniqueId() + "." + key, value); saveConfig(); }
     private void giveSettingsItem(Player p) { p.getInventory().setItem(8, settingsItem()); }
+    // ---------- Settings system (anvil) ----------
+    private record SettingDef(String key, String label, String category, List<String> options, String def, Material icon, String lore) {
+        boolean isToggle() { return options == null; }
+    }
+    private static SettingDef tgl(String key, String label, String cat, boolean def, Material icon, String lore) { return new SettingDef(key, label, cat, null, String.valueOf(def), icon, lore); }
+    private static SettingDef cyc(String key, String label, String cat, List<String> opts, String def, Material icon, String lore) { return new SettingDef(key, label, cat, opts, def, icon, lore); }
+    private static final List<String> SETTING_CATEGORIES = List.of("matches", "visuals", "chat", "social");
+    private static final List<SettingDef> SETTINGS = List.of(
+        // Matches
+        cyc("ping_range", "Ping Range", "matches", List.of("No Limit", "50ms", "100ms", "150ms", "200ms"), "No Limit", Material.CLOCK, "Only get queued against players whose ping is within this limit"),
+        tgl("allow_spectators", "Allow Spectators", "matches", true, Material.LIME_DYE, "Let other players /spectate your matches"),
+        tgl("spectator_alerts", "Spectator Alerts", "matches", true, Material.LIME_DYE, "Get a message when someone starts or stops spectating your match"),
+        tgl("see_other_spectators", "See Other Spectators", "matches", false, Material.LIME_DYE, "While spectating, see other spectators"),
+        tgl("auto_gg", "Auto GG", "matches", false, Material.LIME_DYE, "Automatically say gg when a duel ends"),
+        tgl("duel_titles", "Duel Titles", "matches", true, Material.LIME_DYE, "Countdown, round and result titles"),
+        tgl("round_messages", "Round Messages", "matches", true, Material.LIME_DYE, "Round won/lost chat messages"),
+        tgl("duel_sounds", "Duel Sounds", "matches", true, Material.LIME_DYE, "Countdown and duel result sounds"),
+        tgl("queue_sounds", "Queue Sounds", "matches", false, Material.LIME_DYE, "Queue confirmation sounds"),
+        // Visuals
+        tgl("scoreboard", "Scoreboard", "visuals", true, Material.LIME_DYE, "Show your personal sidebar"),
+        tgl("tab_info", "Tab Info", "visuals", true, Material.LIME_DYE, "Custom tab header and footer"),
+        tgl("kill_effects", "Kill Effects", "visuals", true, Material.LIME_DYE, "Particle burst when you win a round"),
+        tgl("lobby_players", "Lobby Players", "visuals", true, Material.LIME_DYE, "Show other players while you are in the lobby"),
+        cyc("preferred_time", "Preferred Time", "visuals", List.of("Server", "Sunrise", "Noon", "Sunset", "Midnight"), "Server", Material.CLOCK, "Your own time of day (only you see it)"),
+        // Chat
+        tgl("public_chat", "Public Chat", "chat", true, Material.LIME_DYE, "Receive public chat messages"),
+        tgl("lobby_tips", "Lobby Tips", "chat", true, Material.LIME_DYE, "Occasional tips while you are in the lobby"),
+        tgl("family_friendly", "Family Friendly Chat", "chat", false, Material.LIME_DYE, "Censor swear words in chat you receive"),
+        tgl("message_sounds", "Message Sounds", "chat", false, Material.LIME_DYE, "Sound when you receive a private message"),
+        cyc("match_chat", "Match Chat", "chat", List.of("Everyone", "Duel Only", "Off"), "Everyone", Material.WRITABLE_BOOK, "Whose chat you see while you are in a duel"),
+        // Social & Privacy
+        cyc("duel_requests", "Duel Requests", "social", List.of("On", "Off"), "On", Material.CLOCK, "Allow other players to challenge you"),
+        cyc("private_messages", "Private Messages", "social", List.of("On", "Off"), "On", Material.CLOCK, "Allow other players to /msg you (staff can always message you)")
+    );
+    private SettingDef settingDef(String key) { for (SettingDef d : SETTINGS) if (d.key().equals(key)) return d; return null; }
+    private List<SettingDef> settingsIn(String category) { return SETTINGS.stream().filter(d -> d.category().equals(category)).toList(); }
+    private String settingString(Player p, String key) {
+        SettingDef d = settingDef(key);
+        Object raw = getConfig().get("player-settings." + p.getUniqueId() + "." + key);
+        if (raw == null) return d == null ? "" : d.def();
+        return String.valueOf(raw);
+    }
+    private String categoryTitle(String category) { return switch (category) { case "matches" -> "Matches"; case "visuals" -> "Visuals"; case "chat" -> "Chat"; default -> "Social & Privacy"; }; }
+    private Material categoryIcon(String category) { return switch (category) { case "matches" -> Material.IRON_SWORD; case "visuals" -> Material.NETHER_STAR; case "chat" -> Material.OAK_SIGN; default -> Material.SHIELD; }; }
+    private String categoryLore(String category) { return switch (category) { case "matches" -> "Duel and queue preferences"; case "visuals" -> "Scoreboard, effects and time"; case "chat" -> "Chat and message preferences"; default -> "Requests and privacy"; }; }
+    // Two columns (slots col 2 and col 6), as many rows as needed, back button in the row below.
+    private int settingSlot(int index) { return (index / 2) * 9 + (index % 2 == 0 ? 2 : 6); }
+    private int settingRows(int count) { return (count + 1) / 2 + 1; }
+    private int settingBackSlot(int count) { return (settingRows(count) - 1) * 9 + 4; }
+
     private void openSettings(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dSettings"));
-        inv.setItem(10, namedItem(Material.IRON_SWORD, "&d&lCombat", List.of("&7Duel and PvP preferences")));
-        inv.setItem(12, namedItem(Material.PAINTING, "&d&lInterface", List.of("&7Scoreboard and visual options")));
-        inv.setItem(14, namedItem(Material.NOTE_BLOCK, "&d&lSounds", List.of("&7Personal sound preferences")));
-        inv.setItem(16, namedItem(Material.FEATHER, "&d&lGameplay", List.of("&7Personal gameplay options")));
-        inv.setItem(22, namedItem(Material.BARRIER, "&cClose", List.of("&7Close settings")));
+        Inventory inv = Bukkit.createInventory(null, settingRows(SETTING_CATEGORIES.size()) * 9, c("&5&lAzurPvP &8» &dSettings"));
+        for (int i = 0; i < SETTING_CATEGORIES.size(); i++) {
+            String cat = SETTING_CATEGORIES.get(i);
+            inv.setItem(settingSlot(i), namedItem(categoryIcon(cat), "&d&l" + categoryTitle(cat), List.of("&7" + categoryLore(cat))));
+        }
+        inv.setItem(settingBackSlot(SETTING_CATEGORIES.size()), namedItem(Material.BARRIER, "&cClose", List.of("&7Close settings")));
         p.openInventory(inv);
     }
     private void openSettingsCategory(Player p, String category) {
-        String title = switch (category) { case "combat" -> "Combat"; case "interface" -> "Interface"; case "sounds" -> "Sounds"; default -> "Gameplay"; };
-        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &d" + title));
-        if (category.equals("interface")) {
-            inv.setItem(11, namedItem(playerSetting(p, "scoreboard", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dScoreboard: " + (playerSetting(p, "scoreboard", true) ? "&aON" : "&cOFF"), List.of("&7Toggle your personal sidebar")));
-            inv.setItem(15, namedItem(playerSetting(p, "tab_info", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dTab info: " + (playerSetting(p, "tab_info", true) ? "&aON" : "&cOFF"), List.of("&7Toggle the custom tab header/footer")));
-        } else if (category.equals("sounds")) {
-            inv.setItem(11, namedItem(playerSetting(p, "duel_sounds", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dDuel sounds: " + (playerSetting(p, "duel_sounds", true) ? "&aON" : "&cOFF"), List.of("&7Countdown and duel result sounds")));
-            inv.setItem(15, namedItem(playerSetting(p, "queue_sounds", false) ? Material.LIME_DYE : Material.GRAY_DYE, "&dQueue sounds: " + (playerSetting(p, "queue_sounds", false) ? "&aON" : "&cOFF"), List.of("&7Queue confirmation sounds")));
-        } else if (category.equals("combat")) {
-            inv.setItem(11, namedItem(playerSetting(p, "duel_titles", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dDuel titles: " + (playerSetting(p, "duel_titles", true) ? "&aON" : "&cOFF"), List.of("&7Toggle countdown and round titles")));
-            inv.setItem(15, namedItem(playerSetting(p, "round_messages", true) ? Material.LIME_DYE : Material.GRAY_DYE, "&dRound messages: " + (playerSetting(p, "round_messages", true) ? "&aON" : "&cOFF"), List.of("&7Toggle duel round messages")));
-        } else {
-            inv.setItem(13, namedItem(playerSetting(p, "auto_requeue", false) ? Material.LIME_DYE : Material.GRAY_DYE, "&dAuto re-queue: " + (playerSetting(p, "auto_requeue", false) ? "&aON" : "&cOFF"), List.of("&7Preference reserved for future queue flow")));
+        List<SettingDef> defs = settingsIn(category);
+        Inventory inv = Bukkit.createInventory(null, settingRows(defs.size()) * 9, c("&5&lAzurPvP &8» &d" + categoryTitle(category)));
+        for (int i = 0; i < defs.size(); i++) {
+            SettingDef d = defs.get(i);
+            if (d.isToggle()) {
+                boolean on = playerSetting(p, d.key(), Boolean.parseBoolean(d.def()));
+                inv.setItem(settingSlot(i), namedItem(on ? Material.LIME_DYE : Material.GRAY_DYE, (on ? "&a✔ &f" : "&c✖ &7") + d.label(), List.of("&7" + d.lore(), "", "&8Click to toggle")));
+            } else {
+                inv.setItem(settingSlot(i), namedItem(d.icon(), "&6⇄ &f" + d.label() + ": &e" + settingString(p, d.key()), List.of("&7" + d.lore(), "", "&8Click to change")));
+            }
         }
-        inv.setItem(22, namedItem(Material.ARROW, "&aBack", List.of("&7Return to settings")));
+        inv.setItem(settingBackSlot(defs.size()), namedItem(Material.ARROW, "&6← &fBack", List.of("&7Return to settings")));
         p.openInventory(inv);
+    }
+    private void cyclePlayerSetting(Player p, SettingDef d) {
+        List<String> opts = d.options();
+        int idx = opts.indexOf(settingString(p, d.key()));
+        String next = opts.get((idx + 1) % opts.size());
+        getConfig().set("player-settings." + p.getUniqueId() + "." + d.key(), next);
+        saveConfig();
+        tell(p, "&d" + d.label() + " set to &f" + next + "&d.");
+        if (d.key().equals("preferred_time")) applyPreferredTime(p);
+    }
+    private void applyPreferredTime(Player p) {
+        switch (settingString(p, "preferred_time")) {
+            case "Sunrise" -> p.setPlayerTime(23000L, false);
+            case "Noon" -> p.setPlayerTime(6000L, false);
+            case "Sunset" -> p.setPlayerTime(12500L, false);
+            case "Midnight" -> p.setPlayerTime(18000L, false);
+            default -> p.resetPlayerTime();
+        }
+    }
+    // Hides/shows other players for viewers who turned "Lobby Players" off. Your duel opponent is always visible.
+    // Vanished staff are left alone so /vanish keeps working.
+    private void refreshAllLobbyVisibility() {
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            boolean showAll = playerSetting(viewer, "lobby_players", true);
+            UUID opponent = activeDuels.get(viewer.getUniqueId());
+            UUID watched = spectating.get(viewer.getUniqueId());
+            UUID watchedOpponent = watched == null ? null : activeDuels.get(watched);
+            boolean viewerSpectating = watched != null;
+            boolean seeSpectators = playerSetting(viewer, "see_other_spectators", false);
+            for (Player other : Bukkit.getOnlinePlayers()) {
+                if (other.equals(viewer) || vanished.contains(other.getUniqueId())) continue;
+                UUID oid = other.getUniqueId();
+                boolean visible = showAll || (opponent != null && opponent.equals(oid)) || (viewerSpectating && (oid.equals(watched) || oid.equals(watchedOpponent)));
+                if (viewerSpectating && spectating.containsKey(oid) && !seeSpectators) visible = false;
+                if (visible) viewer.showPlayer(this, other); else viewer.hidePlayer(this, other);
+            }
+        }
+    }
+    private int pingLimit(Player p) {
+        String v = settingString(p, "ping_range");
+        if (v.equals("No Limit")) return Integer.MAX_VALUE;
+        try { return Integer.parseInt(v.replace("ms", "")); } catch (NumberFormatException e) { return Integer.MAX_VALUE; }
+    }
+    private boolean pingCompatible(Player a, Player b) { return b.getPing() <= pingLimit(a) && a.getPing() <= pingLimit(b); }
+    private void messageSound(Player to) { if (playerSetting(to, "message_sounds", false)) to.playSound(to.getLocation(), org.bukkit.Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.5f); }
+    private static final List<String> DEFAULT_FAMILY_FRIENDLY_WORDS = List.of("fuck", "shit", "bitch", "cunt", "whore", "slut", "nigger", "nigga", "faggot", "retard");
+    private String filterProfanity(String msg) {
+        List<String> words = getConfig().getStringList("chat.family-friendly-words");
+        if (words.isEmpty()) words = DEFAULT_FAMILY_FRIENDLY_WORDS;
+        String out = msg;
+        for (String w : words) { if (!w.isBlank()) out = out.replaceAll("(?i)" + java.util.regex.Pattern.quote(w), "*".repeat(w.length())); }
+        return out;
+    }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onChatSettings(AsyncPlayerChatEvent e) {
+        Player sender = e.getPlayer();
+        UUID senderId = sender.getUniqueId();
+        String filtered = filterProfanity(e.getMessage());
+        boolean hasProfanity = !filtered.equals(e.getMessage());
+        List<Player> censored = new ArrayList<>();
+        Iterator<Player> it = e.getRecipients().iterator();
+        while (it.hasNext()) {
+            Player r = it.next();
+            if (r.equals(sender)) continue;
+            if (!playerSetting(r, "public_chat", true)) { it.remove(); continue; }
+            UUID rOpponent = activeDuels.get(r.getUniqueId());
+            if (rOpponent != null) {
+                String mc = settingString(r, "match_chat");
+                if (mc.equals("Off") || (mc.equals("Duel Only") && !rOpponent.equals(senderId))) { it.remove(); continue; }
+            }
+            if (hasProfanity && playerSetting(r, "family_friendly", false)) { it.remove(); censored.add(r); }
+        }
+        if (!censored.isEmpty()) {
+            String line;
+            try { line = String.format(e.getFormat(), sender.getDisplayName(), filtered); } catch (RuntimeException ex) { line = "<" + sender.getName() + "> " + filtered; }
+            for (Player r : censored) r.sendMessage(line);
+        }
+    }
+    @EventHandler public void onSettingsJoin(PlayerJoinEvent e) {
+        Player p = e.getPlayer();
+        Bukkit.getScheduler().runTaskLater(this, () -> { if (p.isOnline()) { applyPreferredTime(p); refreshAllLobbyVisibility(); } }, 5L);
+    }
+    private int lobbyTipIndex = 0;
+
+    // ---------- Spectating ----------
+    private Location lobbySpawnLocation() {
+        World w = Bukkit.getWorld(getConfig().getString("spawn.world", ""));
+        if (w == null) return null;
+        return new Location(w, getConfig().getDouble("spawn.x", 0.5), getConfig().getDouble("spawn.y", 80), getConfig().getDouble("spawn.z", 0.5),
+            (float) getConfig().getDouble("spawn.yaw", 0), (float) getConfig().getDouble("spawn.pitch", 0));
+    }
+    private void startSpectating(Player p, Player target) {
+        duelQueue.remove(p.getUniqueId());
+        spectating.put(p.getUniqueId(), target.getUniqueId());
+        p.setGameMode(GameMode.SPECTATOR);
+        p.teleport(target.getLocation());
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (p.isOnline() && target.isOnline() && target.getUniqueId().equals(spectating.get(p.getUniqueId()))) p.setSpectatorTarget(target);
+        }, 2L);
+        tell(p, "&dYou are now spectating &f" + target.getName() + "&d. Use &f/leave &dto stop.");
+        alertDuelists(p, target, "&f" + p.getName() + " &dis now spectating your match.");
+        refreshAllLobbyVisibility();
+    }
+    private void alertDuelists(Player spectator, Player target, String message) {
+        if (vanished.contains(spectator.getUniqueId())) return;
+        UUID oppId = activeDuels.get(target.getUniqueId());
+        Player opp = oppId == null ? null : Bukkit.getPlayer(oppId);
+        for (Player d : new Player[]{target, opp}) {
+            if (d != null && d.isOnline() && playerSetting(d, "spectator_alerts", true)) tell(d, message);
+        }
+    }
+    private void stopSpectating(Player p, String message) {
+        UUID targetId = spectating.remove(p.getUniqueId());
+        if (targetId == null || !p.isOnline()) return;
+        p.setSpectatorTarget(null);
+        p.setGameMode(GameMode.SURVIVAL);
+        Location spawn = lobbySpawnLocation();
+        if (spawn != null) p.teleport(spawn);
+        if (message != null) tell(p, message);
+        Player target = Bukkit.getPlayer(targetId);
+        if (target != null && activeDuels.containsKey(targetId)) alertDuelists(p, target, "&f" + p.getName() + " &dstopped spectating your match.");
+        refreshAllLobbyVisibility();
+    }
+    private void startSpectatorWatch() {
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            for (Map.Entry<UUID, UUID> en : new ArrayList<>(spectating.entrySet())) {
+                Player sp = Bukkit.getPlayer(en.getKey());
+                if (sp == null) { spectating.remove(en.getKey()); continue; }
+                Player t = Bukkit.getPlayer(en.getValue());
+                if (t == null || !activeDuels.containsKey(t.getUniqueId())) continue; // match end is handled by finishDuel
+                if (sp.getGameMode() != GameMode.SPECTATOR) sp.setGameMode(GameMode.SPECTATOR);
+                if (!sp.getWorld().equals(t.getWorld()) || sp.getLocation().distanceSquared(t.getLocation()) > 80 * 80) {
+                    sp.teleport(t.getLocation());
+                    sp.setSpectatorTarget(t);
+                }
+            }
+        }, 20L, 20L);
+    }
+    @EventHandler(ignoreCancelled = true) public void onSpectatorTeleport(PlayerTeleportEvent e) {
+        // Stop spectators using the spectator menu to teleport out of the match.
+        if (e.getCause() == PlayerTeleportEvent.TeleportCause.SPECTATE && spectating.containsKey(e.getPlayer().getUniqueId())) e.setCancelled(true);
+    }
+    @EventHandler public void onSpectatorQuit(PlayerQuitEvent e) {
+        if (spectating.remove(e.getPlayer().getUniqueId()) != null) e.getPlayer().setGameMode(GameMode.SURVIVAL);
+    }
+    @EventHandler(priority = EventPriority.LOWEST) public void onSpectatorCommand(PlayerCommandPreprocessEvent e) {
+        Player p = e.getPlayer();
+        if (!spectating.containsKey(p.getUniqueId())) return;
+        String root = e.getMessage().substring(1).split("\\s+", 2)[0].toLowerCase(Locale.ROOT).replaceFirst("^azurpvputils:", "");
+        if (root.equals("spawn")) { e.setCancelled(true); stopSpectating(p, "&dYou left spectator mode."); }
+        else if (root.equals("duel") || root.equals("accept")) { e.setCancelled(true); tell(p, "&cUse &f/leave &cfirst."); }
+    }
+    private void startLobbyTips() {
+        long interval = Math.max(30L, getConfig().getLong("tips.interval-seconds", 300L)) * 20L;
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            List<String> tips = getConfig().getStringList("tips.messages");
+            if (tips.isEmpty()) tips = List.of("&7Challenge someone with &d/duel <player>&7.", "&7Change your preferences with the &dSettings &7anvil in your hotbar.", "&7Check your stats with &d/stats&7.", "&7Join the community with &d/discord&7.");
+            String tip = tips.get(lobbyTipIndex++ % tips.size());
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (activeDuels.containsKey(online.getUniqueId()) || !playerSetting(online, "lobby_tips", true)) continue;
+                tell(online, "&dTip &8» " + tip);
+            }
+        }, interval, interval);
     }
     private void togglePlayerSetting(Player p, String key, boolean fallback) {
         boolean value = !playerSetting(p, key, fallback);
@@ -1387,6 +1634,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (value) updateAzurTabAndScoreboard(p);
             else { Scoreboard board = p.getScoreboard(); org.bukkit.scoreboard.Objective objective = board.getObjective("azurpvp"); if (objective != null) objective.setDisplaySlot(null); }
         }
+        if (key.equals("lobby_players")) refreshAllLobbyVisibility();
         if (key.equals("tab_info")) {
             if (value) p.setPlayerListHeaderFooter(c("\n&5&lAZUR&d&lPVP\n&7Minecraft 1.21.11+\n"), c("\n&7Players: &d" + Bukkit.getOnlinePlayers().size() + "\n&7Ping: &a" + p.getPing() + "ms\n&d/discord &8| &d/store &8| &d/website\n"));
             else p.setPlayerListHeaderFooter("", "");
@@ -1440,18 +1688,24 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(title==null)return;
         if (title.equals("AzurPvP » Settings")) {
             e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
-            switch (e.getSlot()) { case 10 -> openSettingsCategory(p,"combat"); case 12 -> openSettingsCategory(p,"interface"); case 14 -> openSettingsCategory(p,"sounds"); case 16 -> openSettingsCategory(p,"gameplay"); case 22 -> p.closeInventory(); }
+            if (e.getSlot()==settingBackSlot(SETTING_CATEGORIES.size())) { p.closeInventory(); return; }
+            for (int i = 0; i < SETTING_CATEGORIES.size(); i++) if (e.getSlot()==settingSlot(i)) { openSettingsCategory(p, SETTING_CATEGORIES.get(i)); return; }
             return;
         }
-        if (title.equals("AzurPvP » Combat") || title.equals("AzurPvP » Interface") || title.equals("AzurPvP » Sounds") || title.equals("AzurPvP » Gameplay")) {
+        String settingsCategory = null;
+        for (String cat : SETTING_CATEGORIES) if (title.equals("AzurPvP » " + categoryTitle(cat))) settingsCategory = cat;
+        if (settingsCategory != null) {
             e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
-            String category = title.substring(title.lastIndexOf("»") + 1).trim().toLowerCase(Locale.ROOT);
-            if (e.getSlot()==22) { openSettings(p); return; }
-            if (category.equals("interface")) { if (e.getSlot()==11) togglePlayerSetting(p,"scoreboard",true); else if (e.getSlot()==15) togglePlayerSetting(p,"tab_info",true); }
-            else if (category.equals("sounds")) { if (e.getSlot()==11) togglePlayerSetting(p,"duel_sounds",true); else if (e.getSlot()==15) togglePlayerSetting(p,"queue_sounds",false); }
-            else if (category.equals("combat")) { if (e.getSlot()==11) togglePlayerSetting(p,"duel_titles",true); else if (e.getSlot()==15) togglePlayerSetting(p,"round_messages",true); }
-            else if (category.equals("gameplay") && e.getSlot()==13) togglePlayerSetting(p,"auto_requeue",false);
-            openSettingsCategory(p,category); return;
+            List<SettingDef> defs = settingsIn(settingsCategory);
+            if (e.getSlot()==settingBackSlot(defs.size())) { openSettings(p); return; }
+            for (int i = 0; i < defs.size(); i++) {
+                if (e.getSlot()!=settingSlot(i)) continue;
+                SettingDef d = defs.get(i);
+                if (d.isToggle()) togglePlayerSetting(p, d.key(), Boolean.parseBoolean(d.def())); else cyclePlayerSetting(p, d);
+                openSettingsCategory(p, settingsCategory);
+                return;
+            }
+            return;
         }
         if(title.startsWith("Editing:")) {
             if(e.getClickedInventory()!=e.getView().getTopInventory()) { e.setCancelled(true); return; }
@@ -1491,7 +1745,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         } else {
             if(e.getSlot()==10) { openRoundsInputMenu(p); }
             else if(e.getSlot()==13) { List<String> maps=getConfig().getStringList("duel.maps"); if(maps.isEmpty())maps=List.of("random"); String current=duelMaps.getOrDefault(p.getUniqueId(),"random"); int i=maps.indexOf(current); duelMaps.put(p.getUniqueId(),maps.get((i+1)%maps.size())); openDuelSettings(p); }
-            else if(e.getSlot()==16) { String targetName=duelTargets.get(p.getUniqueId()); Player target=targetName==null?null:Bukkit.getPlayerExact(targetName); if(target==null){p.closeInventory();tell(p,"&cYour opponent is no longer online.");return;} duelRequests.put(target.getUniqueId(),p.getUniqueId()); p.closeInventory(); tell(p,"&dDuel request sent to &f"+target.getName()+"&d. Kit: &f"+duelChosenKits.getOrDefault(p.getUniqueId(),"default")+"&d, rounds: &f"+duelRounds.getOrDefault(p.getUniqueId(),3)+"&d, map: &f"+duelMaps.getOrDefault(p.getUniqueId(),"random")); tell(target,"&d"+p.getName()+" challenged you! Use &f/accept "+p.getName()+"&d."); }
+            else if(e.getSlot()==16) { String targetName=duelTargets.get(p.getUniqueId()); Player target=targetName==null?null:Bukkit.getPlayerExact(targetName); if(target==null){p.closeInventory();tell(p,"&cYour opponent is no longer online.");return;} if(!isStaff(p) && settingString(target,"duel_requests").equals("Off")){p.closeInventory();tell(p,"&c"+target.getName()+" is not accepting duel requests.");return;} duelRequests.put(target.getUniqueId(),p.getUniqueId()); p.closeInventory(); tell(p,"&dDuel request sent to &f"+target.getName()+"&d. Kit: &f"+duelChosenKits.getOrDefault(p.getUniqueId(),"default")+"&d, rounds: &f"+duelRounds.getOrDefault(p.getUniqueId(),3)+"&d, map: &f"+duelMaps.getOrDefault(p.getUniqueId(),"random")); tell(target,"&d"+p.getName()+" challenged you! Use &f/accept "+p.getName()+"&d."); }
         }
     }
     @EventHandler public void onRoundsInputChat(AsyncPlayerChatEvent e) {
@@ -1586,8 +1840,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         int loserScore = duelRoundWins.getOrDefault(loserId, 0);
         int rounds = Math.max(1, duelRounds.getOrDefault(winnerId, duelRounds.getOrDefault(loserId, 1)));
         int winsNeeded = rounds / 2 + 1;
-        tell(winner, "&aRound won! Score: &f" + winnerScore + "-" + loserScore);
-        tell(loser, "&cRound lost. Score: &f" + loserScore + "-" + winnerScore);
+        if (playerSetting(winner, "round_messages", true)) tell(winner, "&aRound won! Score: &f" + winnerScore + "-" + loserScore);
+        if (playerSetting(loser, "round_messages", true)) tell(loser, "&cRound lost. Score: &f" + loserScore + "-" + winnerScore);
+        if (playerSetting(winner, "kill_effects", true)) winner.spawnParticle(org.bukkit.Particle.CRIT, loser.getLocation().add(0, 1, 0), 40, 0.4, 0.6, 0.4, 0.2);
         updateAzurTabAndScoreboard(winner);
         updateAzurTabAndScoreboard(loser);
 
@@ -1598,8 +1853,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
         pendingDuelLosers.add(loserId);
         loser.setGameMode(GameMode.SPECTATOR);
-        winner.sendTitle(c("&a&lROUND WON"), c("&7Next round..."), 0,  40, 10);
-        loser.sendTitle(c("&c&lROUND LOST"), c("&7Next round..."), 0, 40, 10);
+        if (playerSetting(winner, "duel_titles", true)) winner.sendTitle(c("&a&lROUND WON"), c("&7Next round..."), 0,  40, 10);
+        if (playerSetting(loser, "duel_titles", true)) loser.sendTitle(c("&c&lROUND LOST"), c("&7Next round..."), 0, 40, 10);
         Bukkit.getScheduler().runTaskLater(this, () -> {
             if (!winner.isOnline() || !loser.isOnline() || !activeDuels.containsKey(winnerId) || !activeDuels.containsKey(loserId)) return;
             String arenaId = duelArenaByPlayer.get(winnerId);
