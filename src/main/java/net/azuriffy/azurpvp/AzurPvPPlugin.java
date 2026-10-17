@@ -1502,7 +1502,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String kit=duelChosenKits.get(p.getUniqueId()); if(kit==null)return;
         getConfig().set("player-kits."+p.getUniqueId()+"."+kit,null); saveConfig(); openKitEditInventory(p,kit); tell(p,"&eYour personal kit was reset to the server default.");
     }
-    private String normalizeKitName(String name) { return name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", ""); }
+    // Spaces become underscores so a displayed name like "Spear Mace" maps back to the kit key "spear_mace".
+    private String normalizeKitName(String name) { return name.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", "_").replaceAll("[^a-z0-9_-]", ""); }
     private String prettyKitName(String key) { return Arrays.stream(key.replace('_',' ').split(" ")).filter(x->!x.isBlank()).map(x->Character.toUpperCase(x.charAt(0))+x.substring(1)).reduce((a,b)->a+" "+b).orElse(key); }
     private ItemStack kitIconItem(String key) {
         return switch (key.toLowerCase(Locale.ROOT)) {
