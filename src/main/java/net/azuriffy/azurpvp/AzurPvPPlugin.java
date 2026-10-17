@@ -3502,11 +3502,13 @@ final class LitematicArenaLoader {
             int z = (index / sx) % sz;
             int y = index / (sx * sz);
 
-            // Region Size may be negative. Position is the region origin, so a negative
-            // size means the corresponding local axis runs backwards. Normalize all
-            // coordinates into a positive, origin-based arena while preserving the build.
+            // Region Size may be negative on any axis. Litematica's packed BlockStates
+            // are already indexed in local min-to-max Y order; reversing local Y again
+            // mirrors vertically oriented templates upside down. Normalize Y by its
+            // minimum coordinate only. X/Z still need direction normalization for the
+            // negative-axis regions used by these templates.
             int normalizedX = minX + (rawX < 0 ? sx - 1 - x : x);
-            int normalizedY = minY + (rawY < 0 ? sy - 1 - y : y);
+            int normalizedY = minY + y;
             int normalizedZ = minZ + (rawZ < 0 ? sz - 1 - z : z);
             if (paletteIndex != 0 && !palette.get(paletteIndex).startsWith("minecraft:air")) {
                 placements.add(new Placement(normalizedX, normalizedY, normalizedZ, paletteIndex));
