@@ -1576,7 +1576,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }, 40L, 20L);
     }
-    @EventHandler public void onLobbyItemSwapHand(org.bukkit.event.player.PlayerSwapHandItemEvent e) {
+    @EventHandler public void onLobbyItemSwapHand(org.bukkit.event.player.PlayerSwapHandItemsEvent e) {
         if (isLobbyItem(e.getMainHandItem()) || isLobbyItem(e.getOffHandItem())) e.setCancelled(true);
     }
     private boolean isKitEditor(ItemStack item) { return item!=null && item.getType()==Material.BOOK && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&d&lKit editor").equals(item.getItemMeta().getDisplayName()); }
