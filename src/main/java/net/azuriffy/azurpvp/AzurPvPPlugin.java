@@ -1529,25 +1529,40 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     // One-time migration: kits already saved in config.yml don't pick up changes to the defaults,
     // so put a wooden sword into the first empty storage slot of these kits (skipped if one is already there).
     private void addWoodenSwordToKits() {
-        if (getConfig().getBoolean("migrations.wooden-sword-kits-v1", false)) return;
-        for (String kit : List.of("spear_mace", "diamond_smp", "diamond_pot", "neth_pot")) {
-            String path = "kits." + kit + ".contents";
-            if (!getConfig().contains("kits." + kit)) continue;
-            List<?> existing = getConfig().getList(path);
-            ItemStack[] contents = new ItemStack[36];
-            if (existing != null) for (int i = 0; i < Math.min(36, existing.size()); i++) if (existing.get(i) instanceof ItemStack it) contents[i] = it;
-            boolean has = false;
-            for (ItemStack it : contents) if (it != null && it.getType() == Material.WOODEN_SWORD) { has = true; break; }
-            if (has) continue;
-            boolean placed = false;
-            for (int i = 0; i < 36; i++) {
-                if (contents[i] == null || contents[i].getType() == Material.AIR) { contents[i] = new ItemStack(Material.WOODEN_SWORD); placed = true; break; }
-            }
-            if (placed) getConfig().set(path, contents);
-            else getLogger().warning("Kit " + kit + " has no free slot for the wooden sword.");
+        List<String> kitNames = List.of("spear_mace", "diamond_smp", "diamond_pot", "neth_pot");
+        boolean changed = false;
+        if (!getConfig().getBoolean("migrations.wooden-sword-kits-v1", false)) {
+            for (String kit : kitNames) if (getConfig().contains("kits." + kit)) addWoodenSwordAt("kits." + kit + ".contents");
+            getConfig().set("migrations.wooden-sword-kits-v1", true);
+            changed = true;
         }
-        getConfig().set("migrations.wooden-sword-kits-v1", true);
-        saveConfig();
+        // Personal kits saved in the kit editor override the server kit, so they need the sword too.
+        if (!getConfig().getBoolean("migrations.wooden-sword-personal-kits-v1", false)) {
+            ConfigurationSection personal = getConfig().getConfigurationSection("player-kits");
+            if (personal != null) for (String uuid : personal.getKeys(false)) {
+                for (String kit : kitNames) {
+                    if (getConfig().contains("player-kits." + uuid + "." + kit + ".contents")) addWoodenSwordAt("player-kits." + uuid + "." + kit + ".contents");
+                }
+            }
+            getConfig().set("migrations.wooden-sword-personal-kits-v1", true);
+            changed = true;
+        }
+        if (changed) saveConfig();
+    }
+    // Puts a wooden sword in the first empty storage slot at the given contents path (skipped if one is already there).
+    private void addWoodenSwordAt(String path) {
+        List<?> existing = getConfig().getList(path);
+        ItemStack[] contents = new ItemStack[36];
+        if (existing != null) for (int i = 0; i < Math.min(36, existing.size()); i++) if (existing.get(i) instanceof ItemStack it) contents[i] = it;
+        for (ItemStack it : contents) if (it != null && it.getType() == Material.WOODEN_SWORD) return;
+        for (int i = 0; i < 36; i++) {
+            if (contents[i] == null || contents[i].getType() == Material.AIR) {
+                contents[i] = new ItemStack(Material.WOODEN_SWORD);
+                getConfig().set(path, Arrays.asList(contents));
+                return;
+            }
+        }
+        getLogger().warning("No free slot for the wooden sword at " + path);
     }
     private void ensureDefaultKits() {
         String[] names={"sword","axe","mace","spear_mace","diamond_pot","neth_pot","uhc","diamond_smp","vanilla"};
