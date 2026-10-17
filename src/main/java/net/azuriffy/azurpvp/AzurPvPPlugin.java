@@ -596,37 +596,47 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         int winnerPromoWins = rankedValue(wid, mode, "promotion_wins"), loserPromoWins = rankedValue(lid, mode, "promotion_wins");
         boolean winnerPromo = rankedValue(wid, mode, "in_promotion") == 1;
         boolean loserPromo = rankedValue(lid, mode, "in_promotion") == 1;
-        // Exponential tier-gap adjustment: beating a much higher tier is worth more; beating lower tiers is worth less.
-        double gapMultiplier = Math.pow(1.45, lr - wr);
-        // Higher ranks require more effort: base AR decreases exponentially as the tier index rises.
-        double tierDifficulty = Math.pow(1.12, wr);
-        int winnerGain = Math.max(1, Math.min(80, (int)Math.round(12.0 * gapMultiplier / tierDifficulty)));
-        int loserLoss = Math.max(1, Math.min(50, (int)Math.round(8.0 * Math.pow(1.30, wr - lr) * Math.pow(1.05, wr))));
+        // AR gains are generous in lower tiers and scale up for beating higher-tier opponents.
+        double tierDifficulty = Math.pow(1.10, wr);
+        double opponentGap = Math.pow(1.35, lr - wr);
+        int winnerGain = Math.max(2, Math.min(80, (int)Math.round(16.0 * opponentGap / tierDifficulty)));
+        // Losing to a lower-tier opponent is especially costly for the higher-ranked player.
+        double upsetPenalty = lr < wr ? Math.pow(1.65, wr - lr) : 1.0;
+        int loserLoss = Math.max(2, Math.min(90, (int)Math.round((8.0 + 1.5 * lr) * upsetPenalty * Math.pow(1.04, lr))));
         int nextRank = wr, nextAr, nextPromoWins = winnerPromoWins, nextPromo = winnerPromo ? 1 : 0;
         if (wr < AR_RANKS.size()-1) {
+            nextAr = winnerAr + winnerGain;
             if (winnerPromo) {
                 nextPromoWins++;
-                if (nextPromoWins >= 3) { nextRank++; nextAr = 0; nextPromoWins = 0; nextPromo = 0; }
-                else nextAr = 100;
-            } else {
-                nextAr = winnerAr + winnerGain;
-                if (nextAr >= 100) { nextAr = 100; nextPromo = 1; nextPromoWins = 0; }
-            }
+                if (nextPromoWins >= 3 && nextAr >= 100) {
+                    nextRank++; nextAr = Math.max(0, nextAr - 100); nextPromoWins = 0; nextPromo = 0;
+                } else if (nextAr < 100) { nextPromo = 0; nextPromoWins = 0; }
+                else nextPromo = 1;
+            } else if (nextAr >= 100) { nextAr = Math.max(100, nextAr); nextPromo = 1; nextPromoWins = 0; }
         } else nextAr = winnerAr + winnerGain;
         int nextLoserAr = Math.max(0, loserAr - loserLoss);
-        int nextLoserPromo = 0, nextLoserPromoWins = loserPromo ? loserPromoWins : 0;
-        if (lr < AR_RANKS.size()-1 && nextLoserAr >= 100) nextLoserPromo = 1;
-        // Falling below 100 immediately exits promotion and resets its progress.
+        int nextLoserRank = lr;
+        int nextLoserPromo = loserPromo ? 1 : 0;
+        int nextLoserPromoWins = loserPromoWins;
         if (loserPromo && nextLoserAr < 100) { nextLoserPromo = 0; nextLoserPromoWins = 0; }
+        // A promoted player enters the demotion zone below 100 AR and drops a tier below 75 AR.
+        if (lr > 0 && nextLoserAr < 75) {
+            nextLoserRank = lr - 1;
+            nextLoserAr = 100 + nextLoserAr; // carry the remaining AR into the lower tier
+            nextLoserPromo = 0; nextLoserPromoWins = 0;
+        }
         try {
             saveRankedProgress(wid, mode, nextAr, nextRank, nextPromoWins, nextPromo, true);
-            saveRankedProgress(lid, mode, nextLoserAr, lr, nextLoserPromoWins, nextLoserPromo, false);
+            saveRankedProgress(lid, mode, nextLoserAr, nextLoserRank, nextLoserPromoWins, nextLoserPromo, false);
         } catch (SQLException e) { getLogger().warning("Could not save per-mode ranked result: " + e.getMessage()); return; }
         if (nextRank > wr) {
             tell(winner, "&6&lPROMOTION! &d" + prettyKitName(mode) + " rank advanced to &f" + AR_RANKS.get(nextRank) + "&d!");
             winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1.3f);
         } else tell(winner, "&aRanked " + prettyKitName(mode) + " win! &d+" + winnerGain + " AR &8| &d" + AR_RANKS.get(nextRank) + " &8| &dAR: &f" + nextAr + (nextPromo == 1 ? " &8| &6Promotion wins " + nextPromoWins + "/3" : ""));
-        tell(loser, "&cRanked " + prettyKitName(mode) + " loss. &d-" + loserLoss + " AR &8| &d" + AR_RANKS.get(lr) + " &8| &dAR: &f" + nextLoserAr + (loserPromo && nextLoserPromo == 0 ? " &8| &cPromotion progress reset" : ""));
+        tell(loser, "&cRanked " + prettyKitName(mode) + " loss. &d-" + loserLoss + " AR &8| &d" + AR_RANKS.get(nextLoserRank) + " &8| &dAR: &f" + nextLoserAr + (loserPromo && nextLoserPromo == 0 ? " &8| &cPromotion progress reset" : ""));
+        if (nextRank > wr && nextRank > 0) Bukkit.broadcastMessage(c("&6&lRANK UP &8» &f" + winner.getName() + " &dhas been promoted to &6" + AR_RANKS.get(nextRank) + " &d(" + prettyKitName(mode) + ")!"));
+        if (nextLoserRank < lr) Bukkit.broadcastMessage(c("&c&lDEMOTION &8» &f" + loser.getName() + " &chas been demoted to &f" + AR_RANKS.get(nextLoserRank) + " &c(" + prettyKitName(mode) + ")."));
+        if (wr > 8 || lr > 8) Bukkit.broadcastMessage(c("&5&lHIGH RANK MATCH &8» &d" + winner.getName() + " &7vs &d" + loser.getName() + " &8| &f" + AR_RANKS.get(wr) + " &7vs &f" + AR_RANKS.get(lr) + " &8| &f" + prettyKitName(mode)));
         updateTabRole(winner); updateTabRole(loser); giveRankedItem(winner); giveRankedItem(loser);
     }
     private int playersPlayingKit(String kit, boolean ranked) {
@@ -1067,6 +1077,13 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             e.setDeathMessage(c("&5"+victim.getName()+" &7was defeated by &d"+killer.getName()+" &8(&d"+(int)Math.ceil(killer.getHealth()/2)+"❤&8)"));
         }
     }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true) public void blockRemovedArenaCommands(PlayerCommandPreprocessEvent e) {
+        String raw = e.getMessage().toLowerCase(Locale.ROOT).split("\\s+")[0];
+        if (Set.of("/addarena", "/delarena", "/removearena", "/setarenaspawn", "/setarenaspawn1", "/setarenaspawn2", "/arena", "/arenas").contains(raw)) {
+            e.setCancelled(true); tell(e.getPlayer(), "&cArena management commands have been removed.");
+        }
+    }
+
     @EventHandler public void onCommand(PlayerCommandPreprocessEvent e) {
         Player p = e.getPlayer();
         String[] pieces = e.getMessage().substring(1).split("\\s+", 2);
@@ -1173,12 +1190,21 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 } catch (SQLException ex) { tell(player, "&cCould not check link status."); }
                 return true;
             }
+            try (PreparedStatement linked = db.prepareStatement("SELECT 1 FROM link_codes WHERE uuid=? AND claimed=1 LIMIT 1")) {
+                linked.setString(1, player.getUniqueId().toString());
+                try (ResultSet rs = linked.executeQuery()) {
+                    if (rs.next()) { tell(player, "&aYour Minecraft account is already linked to Discord. You do not need to link it again."); return true; }
+                }
+            } catch (SQLException ex) { tell(player, "&cCould not check your link status. Try again."); return true; }
             String code = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase(Locale.ROOT);
             try (PreparedStatement cleanup = db.prepareStatement("DELETE FROM link_codes WHERE uuid=? AND claimed=0")) { cleanup.setString(1, player.getUniqueId().toString()); cleanup.executeUpdate(); } catch (SQLException ignored) { }
             try (PreparedStatement ps = db.prepareStatement("INSERT INTO link_codes(code,uuid,player_name,created_at,claimed,discord_id) VALUES(?,?,?,?,0,NULL)")) {
                 ps.setString(1, code); ps.setString(2, player.getUniqueId().toString()); ps.setString(3, player.getName()); ps.setLong(4, System.currentTimeMillis()); ps.executeUpdate();
-                tell(player, "&dYour Discord link code is: &f&l" + code);
-                tell(player, "&7In Discord, use &f/link " + code + "&7. It expires after 10 minutes.");
+                player.sendMessage(Component.text(prefix()).append(Component.text("Discord link code: ").color(NamedTextColor.LIGHT_PURPLE))
+                    .append(Component.text(code).color(NamedTextColor.WHITE).decorate(TextDecoration.BOLD)
+                        .clickEvent(ClickEvent.copyToClipboard(code))
+                        .hoverEvent(HoverEvent.showText(Component.text("Click to copy code")))));
+                player.sendMessage(c("&7Go to Discord channel &f#link &7and run &f/link " + code + "&7. Click the code above to copy it. Expires in 10 minutes."));
             } catch (SQLException ex) { tell(player, "&cCould not generate a link code. Try again."); getLogger().warning("Link code generation failed: " + ex.getMessage()); }
             return true;
         }
@@ -2229,6 +2255,27 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
     }
 
+    private boolean isDiscordLinked(UUID uuid) {
+        try (PreparedStatement ps = db.prepareStatement("SELECT 1 FROM link_codes WHERE uuid=? AND claimed=1 LIMIT 1")) {
+            ps.setString(1, uuid.toString()); try (ResultSet rs = ps.executeQuery()) { return rs.next(); }
+        } catch (SQLException ex) { getLogger().warning("Could not check Discord link for " + uuid + ": " + ex.getMessage()); return false; }
+    }
+    private ItemStack tournamentItem() { return namedItem(Material.GOLD_BLOCK, "&6&lTournament", List.of("&7Click for tournament information", "&eJoin or leave an open tournament")); }
+    private boolean isTournamentItem(ItemStack item) { return item != null && item.getType() == Material.GOLD_BLOCK && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&6&lTournament").equals(item.getItemMeta().getDisplayName()); }
+    private void refreshTournamentItem(Player p) { if (tournamentOpen || tournamentRunning) p.getInventory().setItem(4, tournamentItem()); else if (isTournamentItem(p.getInventory().getItem(4))) p.getInventory().setItem(4, null); }
+    private void openTournamentMenu(Player p) {
+        Inventory inv = Bukkit.createInventory(null, 27, c("&5AzurPvP » Tournament"));
+        if (tournamentKit == null) inv.setItem(13, namedItem(Material.BARRIER, "&cNo active tournament", List.of("&7Check back later.")));
+        else inv.setItem(13, namedItem(Material.GOLD_BLOCK, "&6&lTournament Info", List.of("&7Mode: &f" + prettyKitName(tournamentKit), "&7Entrants: &f" + tournamentEntrants.size(), "&7Status: &f" + (tournamentRunning ? "Running" : "Open"))));
+        if (tournamentOpen && !tournamentRunning) {
+            if (isDiscordLinked(p.getUniqueId()) && !tournamentEntrants.contains(p.getUniqueId())) inv.setItem(11, namedItem(Material.LIME_WOOL, "&a&lJoin Tournament", List.of("&7Click to enter")));
+            else if (!isDiscordLinked(p.getUniqueId())) inv.setItem(11, namedItem(Material.CHAIN, "&c&lLink Discord First", List.of("&7Use /link in-game, then link in Discord")));
+            else inv.setItem(11, namedItem(Material.YELLOW_WOOL, "&e&lAlready Joined", List.of("&7You're in the tournament")));
+            if (tournamentEntrants.contains(p.getUniqueId())) inv.setItem(15, namedItem(Material.RED_WOOL, "&c&lLeave Tournament", List.of("&7Click to leave")));
+        }
+        p.openInventory(inv);
+    }
+
     private void handleTournamentCommand(CommandSender sender, String[] args) {
         if (args.length == 0 || args[0].equalsIgnoreCase("help")) {
             tell(sender, "&dTournament commands: &f/tournament join, leave, info");
@@ -2246,6 +2293,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (mode == null) { tell(sender, "&cUnknown mode. Available: &f" + String.join(", ", configuredRankedModes())); return; }
             tournamentKit = mode; tournamentEntrants.clear(); tournamentActivePlayers.clear(); tournamentOpponent.clear();
             tournamentOpen = true; tournamentRunning = false;
+            for (Player online : Bukkit.getOnlinePlayers()) refreshTournamentItem(online);
             Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &dA " + prettyKitName(mode) + " tournament is open! Use &f/tournament join &dto enter."));
             tell(sender, "&aTournament created for &f" + prettyKitName(mode) + "&a. Players can join; run &f/tournament start&a when ready.");
             return;
@@ -2253,10 +2301,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (sub.equals("join")) {
             if (!(sender instanceof Player player)) { tell(sender, "&cPlayers only."); return; }
             if (!tournamentOpen || tournamentRunning) { tell(player, "&cThere is no tournament accepting entries right now."); return; }
-            try (PreparedStatement linked = db.prepareStatement("SELECT 1 FROM link_codes WHERE uuid=? AND claimed=1 LIMIT 1")) {
-                linked.setString(1, player.getUniqueId().toString());
-                try (ResultSet rs = linked.executeQuery()) { if (!rs.next()) { tell(player, "&cLink your Minecraft account to Discord first with &f/link&c to become eligible for tournaments."); return; } }
-            } catch (SQLException ex) { tell(player, "&cCould not verify your Discord link. Try again later."); return; }
+            if (!isDiscordLinked(player.getUniqueId())) { tell(player, "&cLink your Minecraft account to Discord first. Use &f/link &cin-game, then run &f/link <code> &cin the Discord linking channel."); return; }
             if (activeDuels.containsKey(player.getUniqueId()) || duelQueue.containsKey(player.getUniqueId()) || rankedQueued.contains(player.getUniqueId()) || spectating.containsKey(player.getUniqueId())) { tell(player, "&cLeave your current duel, queue, or spectator mode first."); return; }
             if (tournamentEntrants.contains(player.getUniqueId())) { tell(player, "&eYou're already entered."); return; }
             tournamentEntrants.add(player.getUniqueId());
@@ -2280,6 +2325,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             tournamentEntrants.removeIf(id -> Bukkit.getPlayer(id) == null || !Bukkit.getPlayer(id).isOnline());
             if (tournamentEntrants.size() < 2) { tell(sender, "&cAt least two online players must join."); return; }
             tournamentOpen = false; tournamentRunning = true;
+            for (Player online : Bukkit.getOnlinePlayers()) refreshTournamentItem(online);
             List<UUID> entrants = new ArrayList<>(tournamentEntrants); Collections.shuffle(entrants);
             tournamentEntrants.clear(); tournamentEntrants.addAll(entrants); tournamentActivePlayers.clear(); tournamentActivePlayers.addAll(entrants);
             Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &dThe " + prettyKitName(tournamentKit) + " tournament is starting with &f" + entrants.size() + " &dplayers!"));
@@ -2291,6 +2337,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             tournamentRunning = false;
             for (UUID id : new HashSet<>(tournamentActivePlayers)) { Player pl = Bukkit.getPlayer(id); if (pl != null && activeDuels.containsKey(id)) { UUID op = activeDuels.get(id); Player opponent = Bukkit.getPlayer(op); if (opponent != null) finishDuel(opponent, pl); } }
             tournamentEntrants.clear(); tournamentActivePlayers.clear(); tournamentOpponent.clear(); tournamentKit = null; tournamentOpen = false; tournamentRunning = false;
+            for (Player online : Bukkit.getOnlinePlayers()) refreshTournamentItem(online);
             Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &cThe tournament was cancelled by the Owner.")); return;
         }
         tell(sender, "&cUnknown subcommand. Use /tournament help.");
@@ -2545,10 +2592,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }, 20L, 10L);
     }
-    private boolean isLobbyItem(ItemStack item) { return isDuelItem(item) || isRankedItem(item) || isKitEditor(item) || isSettingsItem(item) || isPartyItem(item); }
+    private boolean isLobbyItem(ItemStack item) { return isDuelItem(item) || isRankedItem(item) || isKitEditor(item) || isSettingsItem(item) || isPartyItem(item) || isTournamentItem(item); }
     private void giveLobbyItems(Player p) {
         org.bukkit.inventory.PlayerInventory inv = p.getInventory();
-        for (int i = 0; i < inv.getSize(); i++) { if (i == 0 || i == 1 || i == 2 || i == 7 || i == 8) continue; if (isLobbyItem(inv.getItem(i))) inv.setItem(i, null); }
+        for (int i = 0; i < inv.getSize(); i++) { if (i == 0 || i == 1 || i == 2 || i == 4 || i == 7 || i == 8) continue; if (isLobbyItem(inv.getItem(i))) inv.setItem(i, null); }
         if (isLobbyItem(inv.getItemInOffHand())) inv.setItemInOffHand(null);
         giveDuelItem(p); giveRankedItem(p); giveKitEditor(p);
     }
@@ -2564,7 +2611,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 boolean inParty = partyByPlayer.containsKey(online.getUniqueId());
                 boolean duelSlotOk = inParty ? !isDuelItem(inv.getItem(0)) : isDuelItem(inv.getItem(0));
                 boolean rankedSlotOk = inParty ? !isRankedItem(inv.getItem(1)) : isRankedItem(inv.getItem(1));
-                if (!duelSlotOk || !rankedSlotOk || !isPartyItem(inv.getItem(2)) || !isKitEditor(inv.getItem(7)) || !isSettingsItem(inv.getItem(8))) giveLobbyItems(online);
+                if (!duelSlotOk || !rankedSlotOk || !isPartyItem(inv.getItem(2)) || !isKitEditor(inv.getItem(7)) || !isSettingsItem(inv.getItem(8)) || ((tournamentOpen || tournamentRunning) && !isTournamentItem(inv.getItem(4)))) giveLobbyItems(online);
+                refreshTournamentItem(online);
             }
         }, 40L, 20L);
     }
@@ -3586,6 +3634,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void onDuelItemUse(PlayerInteractEvent e) {
         if (e.getAction()==Action.RIGHT_CLICK_AIR||e.getAction()==Action.RIGHT_CLICK_BLOCK||e.getAction()==Action.LEFT_CLICK_AIR||e.getAction()==Action.LEFT_CLICK_BLOCK) {
+            if (isTournamentItem(e.getItem())) { e.setCancelled(true); openTournamentMenu(e.getPlayer()); return; }
             if (isSettingsItem(e.getItem())) { e.setCancelled(true); openSettings(e.getPlayer()); return; }
             if (isPartyItem(e.getItem())) { e.setCancelled(true); openParty(e.getPlayer()); return; }
             if (isDuelItem(e.getItem())) { e.setCancelled(true); openKitMenu(e.getPlayer(),"queue",null); return; }
@@ -3624,6 +3673,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (e.getClick() == org.bukkit.event.inventory.ClickType.DROP || e.getClick() == org.bukkit.event.inventory.ClickType.CONTROL_DROP) { if (isLobbyItem(e.getCurrentItem())) { e.setCancelled(true); return; } }
         String title=ChatColor.stripColor(e.getView().getTitle());
         if(title==null)return;
+        if (title.equals("AzurPvP » Tournament")) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            if (e.getSlot()==11) {
+                if (!isDiscordLinked(p.getUniqueId())) { p.closeInventory(); tell(p, "&cLink your account first: use &f/link &cin-game, then run &f/link <code> &cin Discord."); return; }
+                handleTournamentCommand(p, new String[]{"join"}); openTournamentMenu(p); return;
+            }
+            if (e.getSlot()==15) { handleTournamentCommand(p, new String[]{"leave"}); openTournamentMenu(p); return; }
+            return;
+        }
         if (title.equals("AzurPvP » Settings")) {
             e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
             if (e.getSlot()==settingBackSlot(SETTING_CATEGORIES.size())) { p.closeInventory(); return; }
