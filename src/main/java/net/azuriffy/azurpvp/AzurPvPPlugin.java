@@ -91,6 +91,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     // Each queued duel receives its own isolated, temporary void world.
     private final Map<String, String> schematicArenaTypes = new ConcurrentHashMap<>();
     private final Map<String, Location[]> schematicArenaSpawns = new ConcurrentHashMap<>();
+    private final Map<String, Map<BlockKey, BlockData>> schematicArenaSnapshots = new ConcurrentHashMap<>();
+    private final Map<String, int[]> schematicArenaBounds = new ConcurrentHashMap<>();
     private final Map<String, Integer> schematicYShifts = new ConcurrentHashMap<>();
     private final Set<String> worldsBeingCreated = ConcurrentHashMap.newKeySet();
     private static final String DUEL_ITEM_NAME = "§d§lDuel";
@@ -438,19 +440,14 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         File file = new File(getDataFolder(), "stats.db");
         db = DriverManager.getConnection("jdbc:sqlite:" + file.getAbsolutePath());
-        // One-time full stats reset the first time this version starts. Runs once, then never again.
-        if (!getConfig().getBoolean("migrations.stats-db-reset-v1", false)) {
-            try (Statement s = db.createStatement()) {
-                s.executeUpdate("DROP TABLE IF EXISTS stats");
-            }
-            getConfig().set("migrations.stats-db-reset-v1", true);
-            saveConfig();
-            getLogger().info("All stats were reset; now saving to stats.db");
-        }
+        // Never drop existing player data during startup. Ranked progression is stored separately per gamemode.
         try (Statement s = db.createStatement()) {
             s.executeUpdate("CREATE TABLE IF NOT EXISTS stats (uuid TEXT PRIMARY KEY, name TEXT NOT NULL, kills INTEGER DEFAULT 0, deaths INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, playtime_seconds INTEGER DEFAULT 0)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, reporter TEXT, target TEXT, reason TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
             s.executeUpdate("CREATE TABLE IF NOT EXISTS duel_history (id INTEGER PRIMARY KEY AUTOINCREMENT, winner_uuid TEXT NOT NULL, winner_name TEXT NOT NULL, loser_uuid TEXT NOT NULL, loser_name TEXT NOT NULL, kit TEXT NOT NULL, winner_score INTEGER NOT NULL, loser_score INTEGER NOT NULL, arena TEXT, ended_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+            // Per-gamemode ranked progression. This table is intentionally normalized for future website/API use.
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS ranked_stats (uuid TEXT NOT NULL, name TEXT NOT NULL, gamemode TEXT NOT NULL, ar INTEGER NOT NULL DEFAULT 0, rank_index INTEGER NOT NULL DEFAULT 0, promotion_wins INTEGER NOT NULL DEFAULT 0, in_promotion INTEGER NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(uuid, gamemode))");
+            s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_ranked_stats_mode_rank ON ranked_stats(gamemode, rank_index DESC, ar DESC)");
         }
         // SQLite has no "ADD COLUMN IF NOT EXISTS": a failure just means the column is already there.
         for (String col : List.of("duel_wins INTEGER DEFAULT 0", "duel_losses INTEGER DEFAULT 0", "duel_streak INTEGER DEFAULT 0", "best_duel_streak INTEGER DEFAULT 0", "elo INTEGER DEFAULT 1000", "ar INTEGER DEFAULT 0", "ar_rank_index INTEGER DEFAULT 0", "promotion_wins INTEGER DEFAULT 0", "in_promotion INTEGER DEFAULT 0", "last_online INTEGER DEFAULT 0")) {
@@ -490,7 +487,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 if (ps.executeUpdate() == 0) getLogger().warning("[DuelStats] No stats row for loser " + loser.getName());
             }
             if (rankedPlayers.contains(winner.getUniqueId()) && rankedPlayers.contains(loser.getUniqueId())) {
-                updateRankedResult(winner, loser);
+                updateRankedResult(winner, loser, normalizeKitName(duelChosenKits.getOrDefault(winner.getUniqueId(), "sword")));
             }
             try (PreparedStatement ps = db.prepareStatement("INSERT INTO duel_history(winner_uuid,winner_name,loser_uuid,loser_name,kit,winner_score,loser_score,arena) VALUES(?,?,?,?,?,?,?,?)")) {
                 ps.setString(1, w); ps.setString(2, winner.getName()); ps.setString(3, l); ps.setString(4, loser.getName());
@@ -506,46 +503,72 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             try { db.setAutoCommit(true); } catch (SQLException ignored) {}
         }
     }
-    private int arRankIndex(UUID id) { return Math.max(0, Math.min(AR_RANKS.size()-1, getStat(id, "ar_rank_index"))); }
-    private String arRank(UUID id) { return AR_RANKS.get(arRankIndex(id)); }
-    private void updateRankedResult(Player winner, Player loser) {
-        ensurePlayer(winner); ensurePlayer(loser);
+    private String rankedModeFor(UUID id) { return normalizeKitName(duelChosenKits.getOrDefault(id, "sword")); }
+    private void ensureRankedRow(Player player, String mode) {
+        try (PreparedStatement ps = db.prepareStatement("INSERT OR IGNORE INTO ranked_stats(uuid,name,gamemode) VALUES(?,?,?)")) {
+            ps.setString(1, player.getUniqueId().toString()); ps.setString(2, player.getName()); ps.setString(3, normalizeKitName(mode)); ps.executeUpdate();
+        } catch (SQLException e) { getLogger().warning("Could not create ranked stats row: " + e.getMessage()); }
+        try (PreparedStatement ps = db.prepareStatement("UPDATE ranked_stats SET name=?, updated_at=CURRENT_TIMESTAMP WHERE uuid=? AND gamemode=?")) {
+            ps.setString(1, player.getName()); ps.setString(2, player.getUniqueId().toString()); ps.setString(3, normalizeKitName(mode)); ps.executeUpdate();
+        } catch (SQLException e) { getLogger().warning("Could not update ranked stats name: " + e.getMessage()); }
+    }
+    private int rankedValue(UUID id, String mode, String column) {
+        if (!Set.of("ar", "rank_index", "promotion_wins", "in_promotion", "wins", "losses").contains(column)) return 0;
+        try (PreparedStatement ps = db.prepareStatement("SELECT " + column + " FROM ranked_stats WHERE uuid=? AND gamemode=?")) {
+            ps.setString(1, id.toString()); ps.setString(2, normalizeKitName(mode));
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getInt(1) : 0; }
+        } catch (SQLException e) { getLogger().warning("Could not read ranked stats: " + e.getMessage()); return 0; }
+    }
+    private int arRankIndex(UUID id) { return arRankIndex(id, rankedModeFor(id)); }
+    private int arRankIndex(UUID id, String mode) { return Math.max(0, Math.min(AR_RANKS.size()-1, rankedValue(id, mode, "rank_index"))); }
+    private String arRank(UUID id) { return arRank(id, rankedModeFor(id)); }
+    private String arRank(UUID id, String mode) { return AR_RANKS.get(arRankIndex(id, mode)); }
+    private void saveRankedProgress(UUID id, String mode, int ar, int rank, int promoWins, int inPromo, boolean won) throws SQLException {
+        String column = won ? "wins" : "losses";
+        try (PreparedStatement ps = db.prepareStatement("UPDATE ranked_stats SET ar=?,rank_index=?,promotion_wins=?,in_promotion=?," + column + "=" + column + "+1,updated_at=CURRENT_TIMESTAMP WHERE uuid=? AND gamemode=?")) {
+            ps.setInt(1, ar); ps.setInt(2, rank); ps.setInt(3, promoWins); ps.setInt(4, inPromo); ps.setString(5, id.toString()); ps.setString(6, normalizeKitName(mode)); ps.executeUpdate();
+        }
+    }
+    private void updateRankedResult(Player winner, Player loser, String mode) {
+        ensurePlayer(winner); ensurePlayer(loser); ensureRankedRow(winner, mode); ensureRankedRow(loser, mode);
         UUID wid = winner.getUniqueId(), lid = loser.getUniqueId();
-        int wr = arRankIndex(wid), lr = arRankIndex(lid);
-        int winnerGain = Math.max(3, Math.min(20, 8 + (lr - wr) * 2));
-        int loserLoss = Math.max(3, Math.min(20, 8 + (wr - lr) * 2));
-        int winnerAr = getStat(wid, "ar"), loserAr = getStat(lid, "ar");
-        boolean winnerPromo = getStat(wid, "in_promotion") == 1;
-        boolean loserPromo = getStat(lid, "in_promotion") == 1;
+        int wr = arRankIndex(wid, mode), lr = arRankIndex(lid, mode);
+        int winnerAr = rankedValue(wid, mode, "ar"), loserAr = rankedValue(lid, mode, "ar");
+        int winnerPromoWins = rankedValue(wid, mode, "promotion_wins"), loserPromoWins = rankedValue(lid, mode, "promotion_wins");
+        boolean winnerPromo = rankedValue(wid, mode, "in_promotion") == 1;
+        boolean loserPromo = rankedValue(lid, mode, "in_promotion") == 1;
+        // Exponential tier-gap adjustment: beating a much higher tier is worth more; beating lower tiers is worth less.
+        double gapMultiplier = Math.pow(1.45, lr - wr);
+        // Higher ranks require more effort: base AR decreases exponentially as the tier index rises.
+        double tierDifficulty = Math.pow(1.12, wr);
+        int winnerGain = Math.max(1, Math.min(80, (int)Math.round(12.0 * gapMultiplier / tierDifficulty)));
+        int loserLoss = Math.max(1, Math.min(50, (int)Math.round(8.0 * Math.pow(1.30, wr - lr) * Math.pow(1.05, wr))));
+        int nextRank = wr, nextAr, nextPromoWins = winnerPromoWins, nextPromo = winnerPromo ? 1 : 0;
         if (wr < AR_RANKS.size()-1) {
             if (winnerPromo) {
-                int wins = getStat(wid, "promotion_wins") + 1;
-                if (wins >= 3) {
-                    try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar_rank_index=?, ar=0, promotion_wins=0, in_promotion=0 WHERE uuid=?")) { ps.setInt(1, wr+1); ps.setString(2, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save ranked promotion: " + e.getMessage()); return; }
-                    tell(winner, "&6&lPROMOTION! &dYou advanced to &f" + AR_RANKS.get(wr+1) + "&d.");
-                    winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1.3f);
-                } else {
-                    try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=MAX(100, ar+?), promotion_wins=? WHERE uuid=?")) { ps.setInt(1, winnerGain); ps.setInt(2, wins); ps.setString(3, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save promotion progress: " + e.getMessage()); return; }
-                    tell(winner, "&aRanked win! &dPromotion wins: &f"+wins+"/3 &8| &dAR: &f"+getStat(wid,"ar"));
-                }
+                nextPromoWins++;
+                if (nextPromoWins >= 3) { nextRank++; nextAr = 0; nextPromoWins = 0; nextPromo = 0; }
+                else nextAr = 100;
             } else {
-                int next = winnerAr + winnerGain;
-                boolean startsPromo = next >= 100;
-                try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=?, in_promotion=?, promotion_wins=0 WHERE uuid=?")) { ps.setInt(1, startsPromo ? 100 : next); ps.setInt(2, startsPromo ? 1 : 0); ps.setString(3, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save ranked win: " + e.getMessage()); return; }
-                tell(winner, "&aRanked win! &d+"+winnerGain+" AR &8| &dAR: &f"+(startsPromo?100:next)+"/100");
-                if (startsPromo) tell(winner, "&6Promotion matches unlocked! &dWin 3 ranked matches to advance to &f"+AR_RANKS.get(wr+1)+"&d. AR cannot fall below 100 during promotion.");
+                nextAr = winnerAr + winnerGain;
+                if (nextAr >= 100) { nextAr = 100; nextPromo = 1; nextPromoWins = 0; }
             }
-        } else {
-            try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=ar+? WHERE uuid=?")) { ps.setInt(1, winnerGain); ps.setString(2, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save ranked win: " + e.getMessage()); return; }
-            tell(winner, "&aRanked win! &d+"+winnerGain+" AR");
-        }
-        // Promotion AR is protected at 100. Outside promotion, AR losses can reach zero.
-        int newLoserAr = loserPromo ? Math.max(100, loserAr-loserLoss) : Math.max(0, loserAr-loserLoss);
-        try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=?, in_promotion=?, promotion_wins=? WHERE uuid=?")) {
-            ps.setInt(1, newLoserAr); ps.setInt(2, loserPromo ? 1 : (newLoserAr >= 100 && lr < AR_RANKS.size()-1 ? 1 : 0));
-            ps.setInt(3, getStat(lid, "promotion_wins")); ps.setString(4, lid.toString()); ps.executeUpdate();
-        } catch (SQLException e) { getLogger().warning("Could not save ranked loss: " + e.getMessage()); return; }
-        tell(loser, "&cRanked loss. &d-"+loserLoss+" AR &8| &dAR: &f"+newLoserAr+(loserPromo?" &8| &6Promotion progress protected":""));
+        } else nextAr = winnerAr + winnerGain;
+        int nextLoserAr = Math.max(0, loserAr - loserLoss);
+        int nextLoserPromo = 0, nextLoserPromoWins = loserPromo ? loserPromoWins : 0;
+        if (lr < AR_RANKS.size()-1 && nextLoserAr >= 100) nextLoserPromo = 1;
+        // Falling below 100 immediately exits promotion and resets its progress.
+        if (loserPromo && nextLoserAr < 100) { nextLoserPromo = 0; nextLoserPromoWins = 0; }
+        try {
+            saveRankedProgress(wid, mode, nextAr, nextRank, nextPromoWins, nextPromo, true);
+            saveRankedProgress(lid, mode, nextLoserAr, lr, nextLoserPromoWins, nextLoserPromo, false);
+        } catch (SQLException e) { getLogger().warning("Could not save per-mode ranked result: " + e.getMessage()); return; }
+        if (nextRank > wr) {
+            tell(winner, "&6&lPROMOTION! &d" + prettyKitName(mode) + " rank advanced to &f" + AR_RANKS.get(nextRank) + "&d!");
+            winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1.3f);
+        } else tell(winner, "&aRanked " + prettyKitName(mode) + " win! &d+" + winnerGain + " AR &8| &d" + AR_RANKS.get(nextRank) + " &8| &dAR: &f" + nextAr + (nextPromo == 1 ? " &8| &6Promotion wins " + nextPromoWins + "/3" : ""));
+        tell(loser, "&cRanked " + prettyKitName(mode) + " loss. &d-" + loserLoss + " AR &8| &d" + AR_RANKS.get(lr) + " &8| &dAR: &f" + nextLoserAr + (loserPromo && nextLoserPromo == 0 ? " &8| &cPromotion progress reset" : ""));
+        updateTabRole(winner); updateTabRole(loser); giveRankedItem(winner); giveRankedItem(loser);
     }
     private int playersPlayingKit(String kit, boolean ranked) {
         String normalized = normalizeKitName(kit); Set<UUID> ids = new HashSet<>();
@@ -1139,7 +1162,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(!(s instanceof Player p)){tell(s,"&cPlayers only.");return true;}
             if(a.length>=1){
                 String want=a[0].toLowerCase(Locale.ROOT);
-                for(Board b:boards()) if(b.id().equals(want)){openBoard(p,b);return true;}
+                for(Board b:boards()) if(b.id().equals(want)){if(b.id().equals("ranked")) openRankedModeLeaderboards(p); else openBoard(p,b);return true;}
                 tell(p,"&cUnknown leaderboard. Options: &f"+String.join(", ",boards().stream().map(Board::id).toList()));return true;
             }
             openLeaderboards(p); return true;
@@ -1790,6 +1813,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                             abortSchematicDuel(first, second, worldName, "&cArena creation cancelled.");
                             return;
                         }
+                        snapshotSchematicArena(world, worldName, placements);
                         beginSchematicDuelCountdown(first, second, worldName);
                     });
                 } catch (Exception ex) {
@@ -1843,6 +1867,32 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         });
     }
 
+    private record ArenaBlockPos(int x, int y, int z) {}
+    private void snapshotSchematicArena(World world, String worldName, List<LitematicArenaLoader.Placement> placements) {
+        if (world == null || placements == null || placements.isEmpty()) return;
+        int minX=Integer.MAX_VALUE,minY=Integer.MAX_VALUE,minZ=Integer.MAX_VALUE,maxX=Integer.MIN_VALUE,maxY=Integer.MIN_VALUE,maxZ=Integer.MIN_VALUE;
+        int shift=getSchematicYShift(worldName);
+        for (LitematicArenaLoader.Placement pl : placements) { minX=Math.min(minX,pl.x()); maxX=Math.max(maxX,pl.x()); minY=Math.min(minY,pl.y()+shift); maxY=Math.max(maxY,pl.y()+shift); minZ=Math.min(minZ,pl.z()); maxZ=Math.max(maxZ,pl.z()); }
+        // Padding catches temporary blocks placed just outside the original structure.
+        minX-=8; maxX+=8; minY=Math.max(world.getMinHeight(),minY-5); maxY=Math.min(world.getMaxHeight()-1,maxY+8); minZ-=8; maxZ+=8;
+        schematicArenaBounds.put(worldName,new int[]{minX,minY,minZ,maxX,maxY,maxZ});
+        Map<BlockKey,BlockData> snapshot=new HashMap<>(); UUID worldId=world.getUID();
+        for(int x=minX;x<=maxX;x++) for(int y=minY;y<=maxY;y++) for(int z=minZ;z<=maxZ;z++) snapshot.put(new BlockKey(worldId,x,y,z),world.getBlockAt(x,y,z).getBlockData().clone());
+        schematicArenaSnapshots.put(worldName,snapshot);
+        getLogger().info("Captured reset snapshot for arena " + worldName + " (" + snapshot.size() + " blocks)");
+    }
+    private void resetSchematicArena(String worldName, Runnable done) {
+        World world=Bukkit.getWorld(worldName); Map<BlockKey,BlockData> snapshot=schematicArenaSnapshots.get(worldName);
+        int[] bounds=schematicArenaBounds.get(worldName);
+        if(world==null || snapshot==null || bounds==null) { if(done!=null) done.run(); return; }
+        for(Entity entity : new ArrayList<>(world.getEntities())) if(!(entity instanceof Player)) entity.remove();
+        List<Map.Entry<BlockKey,BlockData>> entries=new ArrayList<>(snapshot.entrySet());
+        new org.bukkit.scheduler.BukkitRunnable(){ int index=0; public void run(){
+            int end=Math.min(index+4000,entries.size());
+            for(;index<end;index++){ Map.Entry<BlockKey,BlockData> en=entries.get(index); BlockKey k=en.getKey(); world.getBlockAt(k.x(),k.y(),k.z()).setBlockData(en.getValue(),false); }
+            if(index>=entries.size()){ cancel(); if(done!=null) done.run(); }
+        }}.runTaskTimer(this,1L,1L);
+    }
     private int getSchematicYShift(String worldName) {
         // Spawn markers are always moved to Y=0; the same shift applies to every schematic block.
         return schematicYShifts.getOrDefault(worldName, 0);
@@ -2062,6 +2112,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             schematicArenaTypes.remove(arenaId);
             schematicArenaSpawns.remove(arenaId);
             schematicYShifts.remove(arenaId);
+            schematicArenaSnapshots.remove(arenaId);
+            schematicArenaBounds.remove(arenaId);
             occupiedDuelArenas.remove(arenaId);
             return;
         }
@@ -2105,9 +2157,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 else if (mode.startsWith("party")) lore.add(c("&7Click to start a party " + (mode.equals("partyffa") ? "FFA" : "team duel") + " with this kit"));
                 else {
                     if (mode.equals("ranked")) {
-                        lore.add(c("&dYour Rank: &f"+arRank(p.getUniqueId())));
-                        lore.add(c("&dYour AR: &f"+getStat(p.getUniqueId(), "ar")));
-                        if (getStat(p.getUniqueId(), "in_promotion") == 1) lore.add(c("&6Promotion wins: &f"+getStat(p.getUniqueId(), "promotion_wins")+"/3"));
+                        String rankedMode = normalizeKitName(key);
+                        lore.add(c("&dYour Rank: &f"+arRank(p.getUniqueId(), rankedMode)));
+                        lore.add(c("&dYour AR: &f"+rankedValue(p.getUniqueId(), rankedMode, "ar")));
+                        if (rankedValue(p.getUniqueId(), rankedMode, "in_promotion") == 1) lore.add(c("&6Promotion wins: &f"+rankedValue(p.getUniqueId(), rankedMode, "promotion_wins")+"/3"));
                     }
                     lore.add(c(queued ? "&a✔ QUEUED" : "&7Click to queue for this kit"));
                     lore.add(c(queued ? "&eClick again to leave this queue" : "&7You can queue for multiple kits"));
@@ -3200,6 +3253,49 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         inv.setItem(22, namedItem(Material.BARRIER, "&cClose", List.of("&7Close leaderboards")));
         p.openInventory(inv);
     }
+    private void openRankedModeLeaderboards(Player p) {
+        Inventory inv = Bukkit.createInventory(null, 45, c("&5&lAzurPvP &8» &dRanked Gamemodes"));
+        List<String> modes = configuredRankedModes();
+        int[] slots = {10,11,12,13,14,15,16,19,20,21,22,23,24,25,31};
+        for (int i=0; i<modes.size() && i<slots.length; i++) {
+            String mode = modes.get(i);
+            inv.setItem(slots[i], namedItem(Material.GOLDEN_SWORD, "&d&l" + prettyKitName(mode), List.of("&7View ranked AR and tiers", "&7Click to open leaderboard")));
+        }
+        inv.setItem(40, namedItem(Material.ARROW, "&6← &fBack", List.of("&7Return to leaderboards")));
+        p.openInventory(inv);
+    }
+    private List<String> configuredRankedModes() {
+        ConfigurationSection section = getConfig().getConfigurationSection("kits");
+        LinkedHashSet<String> modes = new LinkedHashSet<>();
+        if (section != null) for (String key : section.getKeys(false)) modes.add(normalizeKitName(key));
+        if (modes.isEmpty()) modes.addAll(List.of("sword", "axe", "diamond_pot", "netherite_pot", "mace", "spear_mace", "vanilla", "uhc", "diamond_smp"));
+        return new ArrayList<>(modes);
+    }
+    private void openRankedModeBoard(Player p, String mode) {
+        Inventory inv = Bukkit.createInventory(null, 45, c("&5&lAzurPvP &8» &dRanked " + prettyKitName(mode)));
+        int[] slots = {11,12,13,14,15,20,21,22,23,24}; int rank = 0;
+        try (PreparedStatement ps = db.prepareStatement("SELECT uuid,name,ar,rank_index,wins,losses FROM ranked_stats WHERE gamemode=? AND (wins+losses)>0 ORDER BY rank_index DESC,ar DESC,wins DESC LIMIT 10")) {
+            ps.setString(1, normalizeKitName(mode));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next() && rank < slots.length) {
+                    String uuid = rs.getString("uuid"), name = rs.getString("name");
+                    int ar = rs.getInt("ar"), ri = Math.max(0, Math.min(AR_RANKS.size()-1, rs.getInt("rank_index")));
+                    ItemStack head = new ItemStack(Material.PLAYER_HEAD); ItemMeta meta = head.getItemMeta();
+                    if (meta instanceof org.bukkit.inventory.meta.SkullMeta sm) {
+                        try { sm.setOwningPlayer(Bukkit.getOfflinePlayer(UUID.fromString(uuid))); } catch (IllegalArgumentException ignored) {}
+                        String color = rank == 0 ? "&6" : rank == 1 ? "&f" : rank == 2 ? "&c" : "&7";
+                        sm.setDisplayName(c(color + "#" + (rank+1) + " &f" + name));
+                        sm.setLore(List.of(c("&7Gamemode: &d"+prettyKitName(mode)), c("&7Tier: &f"+AR_RANKS.get(ri)), c("&7AR: &f"+ar), c("&7Wins: &a"+rs.getInt("wins")+" &8| &7Losses: &c"+rs.getInt("losses"))));
+                        head.setItemMeta(sm);
+                    }
+                    inv.setItem(slots[rank++], head);
+                }
+            }
+        } catch (SQLException e) { getLogger().warning("Ranked leaderboard query failed: " + e.getMessage()); }
+        if (rank == 0) inv.setItem(22, namedItem(Material.BARRIER, "&cNo data yet", List.of("&7No ranked matches for this gamemode yet")));
+        inv.setItem(40, namedItem(Material.ARROW, "&6← &fBack", List.of("&7Choose another ranked gamemode")));
+        p.openInventory(inv);
+    }
     private void openBoard(Player p, Board b) {
         Inventory inv = Bukkit.createInventory(null, 45, c("&5&lAzurPvP &8» &d" + b.title()));
         int[] slots = {11, 12, 13, 14, 15, 20, 21, 22, 23, 24};
@@ -3252,7 +3348,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
     }
     private boolean isRankedItem(ItemStack item) { return item != null && item.getType() == Material.GOLDEN_SWORD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && RANKED_ITEM_NAME.equals(item.getItemMeta().getDisplayName()); }
-    private void giveRankedItem(Player p) { if (partyByPlayer.containsKey(p.getUniqueId())) { p.getInventory().setItem(1, null); return; } p.getInventory().setItem(1, namedItem(Material.GOLDEN_SWORD, "&6&lRanked Duel", List.of("&7Queue for ranked matches", "&dRank: &f"+arRank(p.getUniqueId()), "&dAR: &f"+getStat(p.getUniqueId(), "ar")))); }
+    private void giveRankedItem(Player p) { if (partyByPlayer.containsKey(p.getUniqueId())) { p.getInventory().setItem(1, null); return; } String mode = "sword"; p.getInventory().setItem(1, namedItem(Material.GOLDEN_SWORD, "&6&lRanked Duel", List.of("&7Choose a gamemode to queue", "&dSword rank: &f"+arRank(p.getUniqueId(), mode), "&dSword AR: &f"+rankedValue(p.getUniqueId(), mode, "ar")))); }
     private boolean isDuelItem(ItemStack item) { return item!=null && item.getType()==Material.IRON_SWORD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && DUEL_ITEM_NAME.equals(item.getItemMeta().getDisplayName()); }
     private void giveDuelItem(Player p) {
         // Players in a party can't queue, so their duel sword is taken away (and comes back when they leave).
@@ -3334,7 +3430,22 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
             if (e.getSlot()==22) { p.closeInventory(); return; }
             List<Board> list = boards();
-            if (e.getSlot()>=10 && e.getSlot()-10<list.size()) openBoard(p, list.get(e.getSlot()-10));
+            if (e.getSlot()>=10 && e.getSlot()-10<list.size()) { Board selected = list.get(e.getSlot()-10); if (selected.id().equals("ranked")) openRankedModeLeaderboards(p); else openBoard(p, selected); }
+            return;
+        }
+        if (title.equals("AzurPvP » Ranked Gamemodes")) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            if (e.getSlot()==40) { openLeaderboards(p); return; }
+            ItemStack item = e.getCurrentItem();
+            if (item != null && item.hasItemMeta() && item.getItemMeta().hasDisplayName()) {
+                String name = ChatColor.stripColor(item.getItemMeta().getDisplayName());
+                for (String mode : configuredRankedModes()) if (prettyKitName(mode).equalsIgnoreCase(name)) { openRankedModeBoard(p, mode); return; }
+            }
+            return;
+        }
+        for (String mode : configuredRankedModes()) if (title.equals("AzurPvP » Ranked " + prettyKitName(mode))) {
+            e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
+            if (e.getSlot()==40) openRankedModeLeaderboards(p);
             return;
         }
         for (Board lbBoard : boards()) if (title.equals("AzurPvP » " + lbBoard.title())) {
@@ -3587,6 +3698,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Bukkit.getScheduler().runTaskLater(this, () -> {
             if (!winner.isOnline() || !loser.isOnline() || !activeDuels.containsKey(winnerId) || !activeDuels.containsKey(loserId)) return;
             String arenaId = duelArenaByPlayer.get(winnerId);
+            resetSchematicArena(arenaId, () -> {
+            if (!winner.isOnline() || !loser.isOnline() || !activeDuels.containsKey(winnerId) || !activeDuels.containsKey(loserId)) return;
             Location[] schematicSpawns = arenaId == null ? null : schematicArenaSpawns.get(arenaId);
             Location spawn1 = schematicSpawns != null && schematicSpawns.length >= 2
                     ? schematicSpawns[0] : (arenaId == null ? null : arenaSpawn(arenaId, 1));
@@ -3612,6 +3725,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
             winner.sendTitle(c("&a&lFIGHT!"), c("&7Next round"), 0, 30, 10);
             loser.sendTitle(c("&a&lFIGHT!"), c("&7Next round"), 0, 30, 10);
+            });
         }, 40L);
     }
 
