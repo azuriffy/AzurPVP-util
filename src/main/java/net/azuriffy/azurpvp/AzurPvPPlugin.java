@@ -1295,7 +1295,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(n.equals("playtime")) { if(!(s instanceof Player p))return true;long seconds=getStatLong(p.getUniqueId(),"playtime_seconds")+sessionSeconds(p.getUniqueId());tell(p,"&dPlaytime: &f"+fmtDuration(seconds));return true; }
         if(n.equals("cps")) { tell(s,"&7CPS monitoring is not active in this build; use a dedicated anti-cheat for enforcement.");return true; }
         if(n.equals("rules")){tell(s,getConfig().getString("messages.rules","&dBe respectful."));return true;}
-        if(n.equals("discord")){tell(s,getConfig().getString("messages.discord","&dSet your Discord invite in config.yml"));return true;}
+        if(n.equals("discord")){tell(s,"&dDiscord: &fhttps://discord.gg/dYDFh2A4tE");return true;}
         if(n.equals("ping")){if(s instanceof Player p)tell(p,"&7Ping: &d"+p.getPing()+"ms");return true;}
         if(n.equals("tps")){tell(s,"&7TPS: &d"+String.format(Locale.US,"%.2f",Bukkit.getTPS()[0]));return true;}
         if(n.equals("fly")){if(!(s instanceof Player p))return true;if(!isStaff(p)){tell(p,"&cStaff role required for /fly.");return true;}p.setAllowFlight(!p.getAllowFlight());tell(p,"&dFlight "+(p.getAllowFlight()?"enabled":"disabled")+".");return true;}
@@ -2510,12 +2510,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (player != null && player.isOnline()) player.playSound(player.getLocation(), sound, 0.7f, pitch);
     }
     private void partyBroadcast(Party party, String msg) {
+        // Broadcast text only; each party action plays its own distinct sound at the call site.
         for (UUID id : party.members) {
             Player m = Bukkit.getPlayer(id);
-            if (m != null) {
-                tell(m, msg);
-                partySound(m, org.bukkit.Sound.UI_BUTTON_CLICK, 1.2f);
-            }
+            if (m != null) tell(m, msg);
         }
     }
     private boolean partyBlocked(Player p) {
@@ -2549,8 +2547,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         long expires = System.currentTimeMillis() + getConfig().getLong("party.invite-seconds", 60L) * 1000L;
         partyInvites.computeIfAbsent(target.getUniqueId(), k -> new ConcurrentHashMap<>()).put(leader.getUniqueId(), expires);
         tell(leader, "&dInvited &f" + target.getName() + " &dto your party.");
-        partySound(leader, org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 1.2f);
-        partySound(target, org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 1.5f);
+        // A crisp confirmation for the inviter and a different incoming-invite sound for the target.
+        partySound(leader, org.bukkit.Sound.UI_TOAST_IN, 1.25f);
+        partySound(target, org.bukkit.Sound.BLOCK_AMETHYST_BLOCK_CHIME, 1.55f);
         net.kyori.adventure.text.Component line = net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection()
             .deserialize(prefix() + c("&d" + leader.getName() + " &7invited you to their party. "))
             .append(net.kyori.adventure.text.Component.text("[ACCEPT]", net.kyori.adventure.text.format.NamedTextColor.GREEN, net.kyori.adventure.text.format.TextDecoration.BOLD)
@@ -2582,6 +2581,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         tell(p, "&aYou joined &f" + nameOf(party.leader) + "&a's party. Queueing is disabled while you are in a party.");
         partySound(p, org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 0.9f);
         partyBroadcast(party, "&d" + p.getName() + " &7joined the party.");
+        for (UUID memberId : party.members) {
+            if (memberId.equals(p.getUniqueId())) continue;
+            Player member = Bukkit.getPlayer(memberId);
+            if (member != null) partySound(member, org.bukkit.Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.15f);
+        }
     }
     // how: "leave", "kick" or "quit". A leader who leaves hands leadership to the next member.
     private void removeFromParty(UUID id, String how) {
@@ -2592,6 +2596,10 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String name = nameOf(id);
         if (!party.members.isEmpty()) {
             partyBroadcast(party, "&d" + name + (how.equals("kick") ? " &7was kicked from the party." : " &7left the party."));
+            for (UUID memberId : party.members) {
+                Player member = Bukkit.getPlayer(memberId);
+                if (member != null) partySound(member, how.equals("kick") ? org.bukkit.Sound.ENTITY_VILLAGER_NO : org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, how.equals("kick") ? 0.9f : 0.8f);
+            }
             if (party.leader.equals(id)) {
                 party.leader = party.members.iterator().next();
                 partyBroadcast(party, "&d" + nameOf(party.leader) + " &7is now the party leader.");
@@ -2599,7 +2607,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if (gone != null && !how.equals("quit")) {
             tell(gone, how.equals("kick") ? "&cYou were kicked from the party." : "&7You left the party.");
-            partySound(gone, how.equals("kick") ? org.bukkit.Sound.ENTITY_VILLAGER_NO : org.bukkit.Sound.UI_BUTTON_CLICK, 0.9f);
+            partySound(gone, how.equals("kick") ? org.bukkit.Sound.ENTITY_VILLAGER_HURT : org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, how.equals("kick") ? 0.85f : 0.75f);
             refreshPartyItems(gone);
         }
     }
@@ -2622,7 +2630,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             Player m = Bukkit.getPlayer(id);
             if (m == null) continue;
             tell(m, "&cThe party was disbanded.");
-            partySound(m, org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f);
+            partySound(m, org.bukkit.Sound.BLOCK_RESPAWN_ANCHOR_DEPLETE, 0.8f);
             refreshPartyItems(m);
         }
     }
