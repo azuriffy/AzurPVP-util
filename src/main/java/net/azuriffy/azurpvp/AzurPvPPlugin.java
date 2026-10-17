@@ -619,10 +619,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         int nextLoserPromo = loserPromo ? 1 : 0;
         int nextLoserPromoWins = loserPromoWins;
         if (loserPromo && nextLoserAr < 100) { nextLoserPromo = 0; nextLoserPromoWins = 0; }
-        // A promoted player enters the demotion zone below 100 AR and drops a tier below 75 AR.
-        if (lr > 0 && nextLoserAr < 75) {
+        // AR below 100 after a promotion is progress toward the next rank, not demotion progress.
+        // Only consider demotion when the player was already in the 100+ AR zone before this loss;
+        // otherwise a newly promoted player at (for example) 64 AR would be demoted on their first loss.
+        if (lr > 0 && loserAr >= 100 && nextLoserAr < 75) {
             nextLoserRank = lr - 1;
-            nextLoserAr = 100 + nextLoserAr; // carry the remaining AR into the lower tier
+            nextLoserAr = Math.max(0, nextLoserAr); // do not add 100 and create misleading AR like 154
             nextLoserPromo = 0; nextLoserPromoWins = 0;
         }
         try {
