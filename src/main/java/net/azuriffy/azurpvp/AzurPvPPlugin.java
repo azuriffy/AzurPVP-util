@@ -2269,7 +2269,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         else inv.setItem(13, namedItem(Material.GOLD_BLOCK, "&6&lTournament Info", List.of("&7Mode: &f" + prettyKitName(tournamentKit), "&7Entrants: &f" + tournamentEntrants.size(), "&7Status: &f" + (tournamentRunning ? "Running" : "Open"))));
         if (tournamentOpen && !tournamentRunning) {
             if (isDiscordLinked(p.getUniqueId()) && !tournamentEntrants.contains(p.getUniqueId())) inv.setItem(11, namedItem(Material.LIME_WOOL, "&a&lJoin Tournament", List.of("&7Click to enter")));
-            else if (!isDiscordLinked(p.getUniqueId())) inv.setItem(11, namedItem(Material.CHAIN, "&c&lLink Discord First", List.of("&7Use /link in-game, then link in Discord")));
+            else if (!isDiscordLinked(p.getUniqueId())) inv.setItem(11, namedItem(Material.LEAD, "&c&lLink Discord First", List.of("&7Use /link in-game, then link in Discord")));
             else inv.setItem(11, namedItem(Material.YELLOW_WOOL, "&e&lAlready Joined", List.of("&7You're in the tournament")));
             if (tournamentEntrants.contains(p.getUniqueId())) inv.setItem(15, namedItem(Material.RED_WOOL, "&c&lLeave Tournament", List.of("&7Click to leave")));
         }
