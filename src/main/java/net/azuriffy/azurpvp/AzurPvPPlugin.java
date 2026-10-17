@@ -3495,14 +3495,24 @@ final class LitematicArenaLoader {
             if (paletteIndex < 0 || paletteIndex >= palette.size()) {
                 throw new IOException("Invalid palette index in schematic.");
             }
+            // Litematica stores block states with X changing fastest, then Z, then Y.
+            // The old code treated Y as the second axis, which scrambled the entire build
+            // and made some templates appear rotated/sideways.
             int x = index % sx;
-            int y = (index / sx) % sy;
-            int z = index / (sx * sy);
+            int z = (index / sx) % sz;
+            int y = index / (sx * sz);
+
+            // Region Size may be negative. Position is the region origin, so a negative
+            // size means the corresponding local axis runs backwards. Normalize all
+            // coordinates into a positive, origin-based arena while preserving the build.
+            int normalizedX = minX + (rawX < 0 ? sx - 1 - x : x);
+            int normalizedY = minY + (rawY < 0 ? sy - 1 - y : y);
+            int normalizedZ = minZ + (rawZ < 0 ? sz - 1 - z : z);
             if (paletteIndex != 0 && !palette.get(paletteIndex).startsWith("minecraft:air")) {
-                placements.add(new Placement(minX + x, minY + y, minZ + z, paletteIndex));
+                placements.add(new Placement(normalizedX, normalizedY, normalizedZ, paletteIndex));
             }
             if (paletteIndex == goldIndex && gold.size() < 3) {
-                gold.add(new SpawnPoint(minX + x, minY + y, minZ + z));
+                gold.add(new SpawnPoint(normalizedX, normalizedY, normalizedZ));
             }
         }
         if (gold.size() != 2) {
