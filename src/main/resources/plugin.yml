@@ -75,6 +75,7 @@ commands:
   cpvparena: {description: Create a 200-block radius CPvP mining area}
   addarena: {description: Create a registered arena, usage: /addarena <number> <true/false>}
   set: {description: Configure arena spawns, usage: /set arena spawn <arena number> <spawn 1-8>}
+  delarena: {description: Delete a registered arena, usage: /delarena <number>}
 permissions:
   azurpvp.admin: {default: op}
   azurpvp.staff: {default: false}
