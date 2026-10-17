@@ -2078,7 +2078,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     || entity instanceof org.bukkit.entity.Fireball
                     || entity instanceof org.bukkit.entity.WitherSkull
                     || entity instanceof org.bukkit.entity.ShulkerBullet
-                    || entity instanceof org.bukkit.entity.FishingHook
+                    || entity instanceof org.bukkit.entity.FishHook
                     || entity instanceof org.bukkit.entity.AreaEffectCloud) {
                 entity.remove();
             }
