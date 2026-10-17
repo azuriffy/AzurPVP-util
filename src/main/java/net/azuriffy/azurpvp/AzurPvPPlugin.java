@@ -30,6 +30,7 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.data.BlockData;
 import org.bukkit.block.Container;
 import org.bukkit.event.player.*;
 import org.bukkit.inventory.ItemStack;
@@ -49,6 +50,11 @@ import org.bukkit.event.player.PlayerCommandSendEvent;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
+import java.io.BufferedInputStream;
+import java.io.DataInputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.zip.GZIPInputStream;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -72,6 +78,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Set<UUID> pendingDuelLosers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, String> duelArenaByPlayer = new ConcurrentHashMap<>();
     private final Set<String> occupiedDuelArenas = ConcurrentHashMap.newKeySet();
+    // Each queued duel receives its own isolated, temporary void world.
+    private final Map<String, String> schematicArenaTypes = new ConcurrentHashMap<>();
+    private final Map<String, Location[]> schematicArenaSpawns = new ConcurrentHashMap<>();
+    private final Map<String, Integer> schematicYShifts = new ConcurrentHashMap<>();
+    private final Set<String> worldsBeingCreated = ConcurrentHashMap.newKeySet();
     private static final String DUEL_ITEM_NAME = "§d§lDuel";
     private final Map<UUID, UUID> lastMessaged = new ConcurrentHashMap<>();
     private final Map<UUID, Set<UUID>> ignored = new ConcurrentHashMap<>();
@@ -91,6 +102,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
 
     @Override public void onEnable() {
         saveDefaultConfig();
+        new File(getDataFolder(), "arenas").mkdirs();
         cmodeWorlds.addAll(getConfig().getStringList("cmode-bypass-worlds"));
         // One-time cleanup of placeholder arenas 1, 2, and 3 (including their spawn data).
         // The marker prevents deleting them again if the owner creates those arenas later.
@@ -131,6 +143,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         // Periodic world saves reduce data loss on clean restarts; host-level resets still need host configuration fixed.
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             for (World world : Bukkit.getWorlds()) {
+                if (schematicArenaTypes.containsKey(world.getName())) continue;
                 try { world.save(); } catch (Exception ex) { getLogger().warning("World save failed for " + world.getName() + ": " + ex.getMessage()); }
             }
         }, 1200L, 1200L);
@@ -153,6 +166,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         // Explicitly flush every loaded world before the plugin shuts down.
         // Paper normally autosaves worlds, but this helps ensure edits are written during a clean stop.
         for (World world : Bukkit.getWorlds()) {
+            if (schematicArenaTypes.containsKey(world.getName())) continue; // Temporary duel worlds are disposable.
             try {
                 world.save();
                 getLogger().info("Saved world on plugin shutdown: " + world.getName());
@@ -643,9 +657,54 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         double dx=location.getX()-getConfig().getDouble("spawn.x"), dz=location.getZ()-getConfig().getDouble("spawn.z");
         return dx*dx+dz*dz <= 500.0*500.0;
     }
+    private String schematicArenaType(World world) {
+        return world == null ? null : schematicArenaTypes.get(world.getName());
+    }
+
+    private boolean schematicBreakable(String arenaType, Material type) {
+        if (arenaType == null || type == null) return false;
+        return switch (arenaType) {
+            case "vanilla" -> type == Material.GRASS_BLOCK || type == Material.DIRT
+                    || type == Material.STONE || type == Material.DEEPSLATE
+                    || type == Material.COBBLED_DEEPSLATE;
+            case "uhc" -> type == Material.OAK_PLANKS || type == Material.COBBLESTONE
+                    || type == Material.CRAFTING_TABLE || type == Material.COBBLESTONE_STAIRS
+                    || type == Material.COBBLESTONE_SLAB || type == Material.COBBLESTONE_WALL
+                    || type == Material.COBWEB || type == Material.OAK_STAIRS
+                    || type == Material.OAK_SLAB || type == Material.OAK_FENCE
+                    || type == Material.OAK_FENCE_GATE || type == Material.OAK_DOOR
+                    || type == Material.OAK_TRAPDOOR || type == Material.OAK_PRESSURE_PLATE
+                    || type == Material.OAK_BUTTON || type == Material.OAK_SIGN
+                    || type == Material.OAK_WALL_SIGN || type == Material.OAK_HANGING_SIGN
+                    || type == Material.OAK_WALL_HANGING_SIGN;
+            case "mace" -> type.name().endsWith("SHULKER_BOX");
+            default -> false; // Sword/axe/pot arenas are completely block-protected.
+        };
+    }
+
+    private boolean schematicPlaceable(String arenaType, Material type) {
+        if (arenaType == null || type == null) return false;
+        return switch (arenaType) {
+            case "vanilla" -> type == Material.OBSIDIAN || type == Material.CRYING_OBSIDIAN
+                    || type == Material.RESPAWN_ANCHOR || type == Material.GLOWSTONE;
+            case "uhc", "mace" -> true;
+            default -> false;
+        };
+    }
+
+    private boolean schematicProtectsExplosion(Block block) {
+        String arenaType = schematicArenaType(block.getWorld());
+        return arenaType != null && !schematicBreakable(arenaType, block.getType());
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST) public void protectSpawnBlockBreak(BlockBreakEvent e) {
         // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
         if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(false); return; }
+        String schematicType = schematicArenaType(e.getBlock().getWorld());
+        if (schematicType != null) {
+            e.setCancelled(!schematicBreakable(schematicType, e.getBlock().getType()));
+            return;
+        }
         if(inSpawnProtection(e.getBlock().getLocation())) { e.setCancelled(true); tell(e.getPlayer(),"&cSpawn protection: building is disabled here."); return; }
         Location blockLoc = e.getBlock().getLocation();
         for (String key : arenaKeys()) {
@@ -680,6 +739,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private boolean arenaProtectsFromExplosion(org.bukkit.block.Block block) {
         Location loc = block.getLocation();
         if (loc.getWorld() == null || cmodeWorlds.contains(loc.getWorld().getName())) return false;
+        String schematicType = schematicArenaType(loc.getWorld());
+        if (schematicType != null) return schematicProtectsExplosion(block);
         for (String key : arenaKeys()) {
             Location center = arenaCenter(key);
             if (center != null && center.getWorld().equals(loc.getWorld()) && center.distanceSquared(loc) <= 10000.0) {
@@ -702,6 +763,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     @EventHandler(priority = EventPriority.HIGHEST) public void protectSpawnBlockPlace(BlockPlaceEvent e) {
         // Owner-enabled /cmode bypasses this plugin's protections and earlier protection listeners in this world.
         if (cmodeWorlds.contains(e.getBlock().getWorld().getName())) { e.setCancelled(false); return; }
+        String schematicType = schematicArenaType(e.getBlock().getWorld());
+        if (schematicType != null) {
+            e.setCancelled(!schematicPlaceable(schematicType, e.getBlockPlaced().getType()));
+            return;
+        }
         Location location = e.getBlock().getLocation();
         ConfigurationSection cpvps = getConfig().getConfigurationSection("cpvparenas");
         if (cpvps != null) for (String key : cpvps.getKeys(false)) {
@@ -721,6 +787,29 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }
     }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void protectSchematicSpecialItems(PlayerInteractEvent e) {
+        Player player = e.getPlayer();
+        String arenaType = schematicArenaType(player.getWorld());
+        if (arenaType == null || arenaType.equals("vanilla") || arenaType.equals("uhc") || arenaType.equals("mace")) return;
+        ItemStack held = e.getItem();
+        if (held != null && held.getType() == Material.END_CRYSTAL) {
+            e.setCancelled(true);
+            return;
+        }
+        if (e.getClickedBlock() != null && e.getClickedBlock().getType() == Material.RESPAWN_ANCHOR) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void protectSchematicBuckets(PlayerBucketEmptyEvent e) {
+        String arenaType = schematicArenaType(e.getPlayer().getWorld());
+        if (arenaType != null && !(arenaType.equals("uhc") || arenaType.equals("mace"))) {
+            e.setCancelled(true);
+        }
+    }
+
     @EventHandler public void protectSpawnInteractions(PlayerInteractEvent e) {
         if (e.getClickedBlock()==null || !inSpawnProtection(e.getClickedBlock().getLocation())) return;
         Material type=e.getClickedBlock().getType();
@@ -1439,55 +1528,283 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         return null;
     }
 
-    private boolean startDuel(Player first,Player second) {
-        if(activeDuels.containsKey(first.getUniqueId())||activeDuels.containsKey(second.getUniqueId())) { tell(first,"&cOne of you is already in a duel.");tell(second,"&cOne of you is already in a duel.");return false; }
-        // The challenger/first player is authoritative for direct /duel requests.
-        // Copy their selected kit and round count to BOTH participants so stale selections
-        // left on the target from an earlier duel cannot override the challenge settings.
-        String kit = normalizeKitName(duelChosenKits.getOrDefault(first.getUniqueId(), duelChosenKits.getOrDefault(second.getUniqueId(), "sword")));
+    private boolean startDuel(Player first, Player second) {
+        if (activeDuels.containsKey(first.getUniqueId()) || activeDuels.containsKey(second.getUniqueId())) {
+            tell(first, "&cOne of you is already in a duel.");
+            tell(second, "&cOne of you is already in a duel.");
+            return false;
+        }
+        String kit = normalizeKitName(duelChosenKits.getOrDefault(first.getUniqueId(),
+                duelChosenKits.getOrDefault(second.getUniqueId(), "sword")));
         duelChosenKits.put(first.getUniqueId(), kit);
         duelChosenKits.put(second.getUniqueId(), kit);
-        int configuredRounds = Math.max(1, Math.min(99, duelRounds.getOrDefault(first.getUniqueId(), duelRounds.getOrDefault(second.getUniqueId(), 1))));
+        int configuredRounds = Math.max(1, Math.min(99,
+                duelRounds.getOrDefault(first.getUniqueId(), duelRounds.getOrDefault(second.getUniqueId(), 1))));
         duelRounds.put(first.getUniqueId(), configuredRounds);
         duelRounds.put(second.getUniqueId(), configuredRounds);
-        boolean vanilla = kit.equals("vanilla");
-        String arena = null;
-        for (String id : arenaKeys()) {
-            if (arenaSpawn(id, 1) == null || arenaSpawn(id, 2) == null || occupiedDuelArenas.contains(id)) continue;
-            boolean cpvpArena = cpvpRegionForArena(id) != null;
-            if (vanilla == cpvpArena) { arena = id; break; }
+
+        String arenaType = schematicArenaTypeForKit(kit);
+        File schematic = new File(new File(getDataFolder(), "arenas"), schematicFileForType(arenaType));
+        if (!schematic.isFile()) {
+            tell(first, "&cArena template missing: &f" + schematic.getName());
+            tell(second, "&cArena template missing: &f" + schematic.getName());
+            tell(first, "&7Place it in plugins/AzurPvPUtils/arenas/ and restart the server.");
+            tell(second, "&7Place it in plugins/AzurPvPUtils/arenas/ and restart the server.");
+            return false;
         }
-        if (arena == null) return false;
-        final String selectedArena = arena;
-        duelRoundWins.put(first.getUniqueId(), 0); duelRoundWins.put(second.getUniqueId(), 0);
-        occupiedDuelArenas.add(selectedArena);
-        activeDuels.put(first.getUniqueId(),second.getUniqueId());activeDuels.put(second.getUniqueId(),first.getUniqueId()); duelArenaByPlayer.put(first.getUniqueId(),selectedArena);duelArenaByPlayer.put(second.getUniqueId(),selectedArena); duelCountdown.add(first.getUniqueId());duelCountdown.add(second.getUniqueId());
+
+        String worldName = "azur_duel_" + UUID.randomUUID().toString().replace("-", "");
+        if (!worldsBeingCreated.add(worldName)) return false;
+        duelQueue.remove(first.getUniqueId());
+        duelQueue.remove(second.getUniqueId());
+        first.sendActionBar(net.kyori.adventure.text.Component.empty());
+        second.sendActionBar(net.kyori.adventure.text.Component.empty());
+        duelRoundWins.put(first.getUniqueId(), 0);
+        duelRoundWins.put(second.getUniqueId(), 0);
+        activeDuels.put(first.getUniqueId(), second.getUniqueId());
+        activeDuels.put(second.getUniqueId(), first.getUniqueId());
+        duelArenaByPlayer.put(first.getUniqueId(), worldName);
+        duelArenaByPlayer.put(second.getUniqueId(), worldName);
+        duelCountdown.add(first.getUniqueId());
+        duelCountdown.add(second.getUniqueId());
         refreshAllLobbyVisibility();
-        first.setGameMode(GameMode.SURVIVAL);second.setGameMode(GameMode.SURVIVAL);first.setHealth(first.getMaxHealth());second.setHealth(second.getMaxHealth());first.setFoodLevel(20);second.setFoodLevel(20);
-        tell(first,"&aDuel accepted: &f"+second.getName()+"&a!"); tell(second,"&aDuel accepted: &f"+first.getName()+"&a!");
-        if (playerSetting(first, "duel_sounds", true)) first.playSound(first.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
-        if (playerSetting(second, "duel_sounds", true)) second.playSound(second.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
-        first.sendTitle(c("&d&lDUEL READY"),c("&7Teleporting in 3 seconds..."),0,60,0); second.sendTitle(c("&d&lDUEL READY"),c("&7Teleporting in 3 seconds..."),0,60,0);
-        for(int sec=3;sec>=1;sec--){final int n=sec; Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){if(playerSetting(first,"duel_titles",true)) first.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0); if(playerSetting(second,"duel_titles",true)) second.sendTitle(c("&5&l"+n),c("&7Teleporting to arena"),0,20,0); if(playerSetting(first,"duel_sounds",true)) first.playSound(first.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f); if(playerSetting(second,"duel_sounds",true)) second.playSound(second.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING,1.0f,1.0f+n*0.15f);}},(4-sec)*20L);}
-        Bukkit.getScheduler().runTaskLater(this,()->{
-            if(!activeDuels.containsKey(first.getUniqueId())||!activeDuels.containsKey(second.getUniqueId())||!first.isOnline()||!second.isOnline())return;
-            first.teleport(arenaSpawn(selectedArena,1)); second.teleport(arenaSpawn(selectedArena,2));
-            // Duel combat tagging begins on arena entry and remains until the duel ends.
+        first.setGameMode(GameMode.SURVIVAL);
+        second.setGameMode(GameMode.SURVIVAL);
+        first.setHealth(first.getMaxHealth());
+        second.setHealth(second.getMaxHealth());
+        first.setFoodLevel(20);
+        second.setFoodLevel(20);
+        tell(first, "&aMatched with &f" + second.getName() + "&a. Preparing your arena...");
+        tell(second, "&aMatched with &f" + first.getName() + "&a. Preparing your arena...");
+
+        // Parse compressed NBT away from the main thread. World/block APIs are only used on the server thread.
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            LitematicArenaLoader.Schematic loaded;
+            try {
+                loaded = LitematicArenaLoader.read(schematic);
+            } catch (Exception ex) {
+                getLogger().warning("Could not read arena template " + schematic.getName() + ": " + ex.getMessage());
+                Bukkit.getScheduler().runTask(this, () -> abortSchematicDuel(first, second, worldName,
+                        "&cCould not load the arena template. Check the server console."));
+                return;
+            }
+            Bukkit.getScheduler().runTask(this, () -> {
+                if (!activeDuels.containsKey(first.getUniqueId()) || !activeDuels.containsKey(second.getUniqueId())
+                        || !first.isOnline() || !second.isOnline()) {
+                    worldsBeingCreated.remove(worldName);
+                    abortSchematicDuel(first, second, worldName, "&cArena creation cancelled.");
+                    return;
+                }
+                World world;
+                try {
+                    WorldCreator creator = new WorldCreator(worldName);
+                    creator.environment(World.Environment.NORMAL);
+                    creator.generator(new ChunkGenerator() {
+                        @Override
+                        public ChunkData generateChunkData(World w, Random random, int x, int z, BiomeGrid biome) {
+                            return createChunkData(w);
+                        }
+                    });
+                    world = Bukkit.createWorld(creator);
+                    if (world == null) throw new IllegalStateException("Bukkit did not create the arena world.");
+                    world.setAutoSave(false);
+                    world.setKeepSpawnInMemory(false);
+                    world.setGameRule(org.bukkit.GameRule.DO_MOB_SPAWNING, false);
+                    world.setGameRule(org.bukkit.GameRule.DO_PATROL_SPAWNING, false);
+                    world.setGameRule(org.bukkit.GameRule.DO_TRADER_SPAWNING, false);
+                    world.setGameRule(org.bukkit.GameRule.DO_WEATHER_CYCLE, false);
+                    world.setGameRule(org.bukkit.GameRule.DO_DAYLIGHT_CYCLE, false);
+                    world.setStorm(false);
+                    world.setThundering(false);
+                    world.setTime(6000L);
+                    schematicArenaTypes.put(worldName, arenaType);
+                    schematicYShifts.put(worldName, loaded.yShift());
+                    occupiedDuelArenas.add(worldName);
+                    BlockData[] paletteData = new BlockData[loaded.palette().size()];
+                    for (int i = 0; i < paletteData.length; i++) {
+                        paletteData[i] = Bukkit.createBlockData(loaded.palette().get(i));
+                    }
+                    List<LitematicArenaLoader.Placement> placements = loaded.placements();
+                    Location[] spawns = new Location[2];
+                    for (int i = 0; i < 2; i++) {
+                        LitematicArenaLoader.SpawnPoint point = loaded.spawnPoints().get(i);
+                        spawns[i] = new Location(world, point.x() + 0.5, 1.0, point.z() + 0.5,
+                                i == 0 ? -90.0f : 90.0f, 0.0f);
+                    }
+                    schematicArenaSpawns.put(worldName, spawns);
+                    world.setSpawnLocation(0, 1, 0);
+                    pasteSchematicInBatches(world, worldName, placements, paletteData, 0, () -> {
+                        worldsBeingCreated.remove(worldName);
+                        if (!activeDuels.containsKey(first.getUniqueId()) || !activeDuels.containsKey(second.getUniqueId())
+                                || !first.isOnline() || !second.isOnline()) {
+                            abortSchematicDuel(first, second, worldName, "&cArena creation cancelled.");
+                            return;
+                        }
+                        beginSchematicDuelCountdown(first, second, worldName);
+                    });
+                } catch (Exception ex) {
+                    getLogger().severe("Arena world setup failed for " + worldName + ": " + ex.getMessage());
+                    worldsBeingCreated.remove(worldName);
+                    abortSchematicDuel(first, second, worldName, "&cArena setup failed. Check the server console.");
+                }
+            });
+        });
+        return true;
+    }
+
+    private String schematicArenaTypeForKit(String kit) {
+        if (kit.equals("vanilla")) return "vanilla";
+        if (kit.contains("mace")) return "mace";
+        if (kit.equals("uhc") || kit.equals("diamond_smp") || kit.equals("diasmp") || kit.equals("dia_smp")) return "uhc";
+        return "locked";
+    }
+
+    private String schematicFileForType(String type) {
+        return switch (type) {
+            case "vanilla" -> "Azur Vanilla.litematic";
+            case "mace" -> "Azur MaceSpearMace.litematic";
+            case "uhc" -> "Azur Uhc Diamond smp.litematic";
+            default -> "Azur Sword Axe Dia Pot neth pot.litematic";
+        };
+    }
+
+    private void pasteSchematicInBatches(World world, String worldName,
+            List<LitematicArenaLoader.Placement> placements, BlockData[] paletteData,
+            int startIndex, Runnable finished) {
+        final int blocksPerTick = 2500;
+        Bukkit.getScheduler().runTask(this, new Runnable() {
+            private int index = startIndex;
+            @Override public void run() {
+                if (Bukkit.getWorld(worldName) != world) return;
+                int end = Math.min(index + blocksPerTick, placements.size());
+                for (; index < end; index++) {
+                    LitematicArenaLoader.Placement placement = placements.get(index);
+                    Block block = world.getBlockAt(placement.x(), placement.y() +
+                            // Each template's gold-block spawn markers are normalized to Y=0 by the reader.
+                            getSchematicYShift(worldName), placement.z());
+                    block.setBlockData(paletteData[placement.paletteIndex()], false);
+                }
+                if (index < placements.size()) {
+                    Bukkit.getScheduler().runTask(AzurPvPPlugin.this, this);
+                } else {
+                    finished.run();
+                }
+            }
+        });
+    }
+
+    private int getSchematicYShift(String worldName) {
+        // Spawn markers are always moved to Y=0; the same shift applies to every schematic block.
+        return schematicYShifts.getOrDefault(worldName, 0);
+    }
+
+    private void beginSchematicDuelCountdown(Player first, Player second, String worldName) {
+        Location[] spawns = schematicArenaSpawns.get(worldName);
+        if (spawns == null || spawns.length < 2) {
+            abortSchematicDuel(first, second, worldName, "&cThe arena spawn markers are invalid.");
+            return;
+        }
+        first.sendTitle(c("&d&lDUEL READY"), c("&7Teleporting in 3 seconds..."), 0, 60, 0);
+        second.sendTitle(c("&d&lDUEL READY"), c("&7Teleporting in 3 seconds..."), 0, 60, 0);
+        for (int sec = 3; sec >= 1; sec--) {
+            final int n = sec;
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (!activeDuels.containsKey(first.getUniqueId()) || !activeDuels.containsKey(second.getUniqueId())
+                        || !first.isOnline() || !second.isOnline()) return;
+                if (playerSetting(first, "duel_titles", true)) first.sendTitle(c("&5&l" + n), c("&7Teleporting to arena"), 0, 20, 0);
+                if (playerSetting(second, "duel_titles", true)) second.sendTitle(c("&5&l" + n), c("&7Teleporting to arena"), 0, 20, 0);
+                if (playerSetting(first, "duel_sounds", true)) first.playSound(first.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.0f + n * 0.15f);
+                if (playerSetting(second, "duel_sounds", true)) second.playSound(second.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.0f + n * 0.15f);
+            }, (4 - sec) * 20L);
+        }
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!activeDuels.containsKey(first.getUniqueId()) || !activeDuels.containsKey(second.getUniqueId())
+                    || !first.isOnline() || !second.isOnline()) return;
+            first.teleport(spawns[0]);
+            second.teleport(spawns[1]);
             arenaCombat.add(first.getUniqueId());
             arenaCombat.add(second.getUniqueId());
-            // Equip the selected kits only after both players have arrived at their arena spawns.
             giveDuelKit(first, duelChosenKits.getOrDefault(first.getUniqueId(), "sword"));
             giveDuelKit(second, duelChosenKits.getOrDefault(second.getUniqueId(), "sword"));
-            first.setHealth(first.getMaxHealth()); second.setHealth(second.getMaxHealth());
-            first.setFoodLevel(20); second.setFoodLevel(20);
-            first.setSaturation(0.0f); second.setSaturation(0.0f);
-            // Start each duel at zero saturation; afterward food items and golden apples
-            // can restore saturation normally during the fight.
-            first.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0); second.sendTitle(c("&5&l5"),c("&7PvP enabled in 5 seconds"),0,20,0);
-            for(int sec=4;sec>=1;sec--){final int n=sec;Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){first.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);second.sendTitle(c("&5&l"+n),c("&7Get ready"),0,20,0);}},(5-sec)*20L);}
-            Bukkit.getScheduler().runTaskLater(this,()->{if(activeDuels.containsKey(first.getUniqueId())&&activeDuels.containsKey(second.getUniqueId())){duelCountdown.remove(first.getUniqueId());duelCountdown.remove(second.getUniqueId());first.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);second.sendTitle(c("&a&lFIGHT!"),c("&7Good luck"),0,30,10);}},100L);
-        },60L);
-        return true;
+            first.setHealth(first.getMaxHealth());
+            second.setHealth(second.getMaxHealth());
+            first.setFoodLevel(20);
+            second.setFoodLevel(20);
+            first.setSaturation(0.0f);
+            second.setSaturation(0.0f);
+            first.sendTitle(c("&5&l5"), c("&7PvP enabled in 5 seconds"), 0, 20, 0);
+            second.sendTitle(c("&5&l5"), c("&7PvP enabled in 5 seconds"), 0, 20, 0);
+            for (int sec = 4; sec >= 1; sec--) {
+                final int n = sec;
+                Bukkit.getScheduler().runTaskLater(this, () -> {
+                    if (activeDuels.containsKey(first.getUniqueId()) && activeDuels.containsKey(second.getUniqueId())) {
+                        first.sendTitle(c("&5&l" + n), c("&7Get ready"), 0, 20, 0);
+                        second.sendTitle(c("&5&l" + n), c("&7Get ready"), 0, 20, 0);
+                    }
+                }, (5 - sec) * 20L);
+            }
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (activeDuels.containsKey(first.getUniqueId()) && activeDuels.containsKey(second.getUniqueId())) {
+                    duelCountdown.remove(first.getUniqueId());
+                    duelCountdown.remove(second.getUniqueId());
+                    first.sendTitle(c("&a&lFIGHT!"), c("&7Good luck"), 0, 30, 10);
+                    second.sendTitle(c("&a&lFIGHT!"), c("&7Good luck"), 0, 30, 10);
+                }
+            }, 100L);
+        }, 60L);
+    }
+
+    private void abortSchematicDuel(Player first, Player second, String worldName, String message) {
+        UUID firstId = first.getUniqueId(), secondId = second.getUniqueId();
+        activeDuels.remove(firstId);
+        activeDuels.remove(secondId);
+        duelRoundWins.remove(firstId);
+        duelRoundWins.remove(secondId);
+        duelCountdown.remove(firstId);
+        duelCountdown.remove(secondId);
+        arenaCombat.remove(firstId);
+        arenaCombat.remove(secondId);
+        combatUntil.remove(firstId);
+        combatUntil.remove(secondId);
+        duelArenaByPlayer.remove(firstId);
+        duelArenaByPlayer.remove(secondId);
+        occupiedDuelArenas.remove(worldName);
+        schematicArenaTypes.remove(worldName);
+        schematicArenaSpawns.remove(worldName);
+        schematicYShifts.remove(worldName);
+        worldsBeingCreated.remove(worldName);
+        if (first.isOnline()) tell(first, message);
+        if (second.isOnline()) tell(second, message);
+        refreshAllLobbyVisibility();
+        World world = Bukkit.getWorld(worldName);
+        if (world != null) {
+            File worldFolder = world.getWorldFolder();
+            if (Bukkit.unloadWorld(world, false)) {
+                Bukkit.getScheduler().runTaskAsynchronously(this, () -> deleteDirectory(worldFolder));
+            } else {
+                Bukkit.getScheduler().runTaskLater(this, () -> abortWorldCleanup(worldName), 20L);
+            }
+        }
+    }
+
+    private void abortWorldCleanup(String worldName) {
+        World world = Bukkit.getWorld(worldName);
+        if (world != null) {
+            if (!Bukkit.unloadWorld(world, false)) {
+                Bukkit.getScheduler().runTaskLater(this, () -> abortWorldCleanup(worldName), 20L);
+                return;
+            }
+            File folder = world.getWorldFolder();
+            Bukkit.getScheduler().runTaskAsynchronously(this, () -> deleteDirectory(folder));
+        }
+    }
+
+    private void deleteDirectory(File file) {
+        if (file == null || !file.exists()) return;
+        File[] children = file.listFiles();
+        if (children != null) for (File child : children) deleteDirectory(child);
+        try { java.nio.file.Files.deleteIfExists(file.toPath()); }
+        catch (Exception ex) { getLogger().warning("Could not delete temporary arena file " + file + ": " + ex.getMessage()); }
     }
 
     private void giveDuelKit(Player p,String kit) {
@@ -1578,6 +1895,25 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     private void cleanArenaEntities(String arenaId) {
+        if (schematicArenaTypes.containsKey(arenaId)) {
+            World temporaryWorld = Bukkit.getWorld(arenaId);
+            if (temporaryWorld != null) {
+                for (Entity entity : new ArrayList<>(temporaryWorld.getEntities())) {
+                    if (!(entity instanceof Player)) entity.remove();
+                }
+                if (!Bukkit.unloadWorld(temporaryWorld, false)) {
+                    Bukkit.getScheduler().runTaskLater(this, () -> cleanArenaEntities(arenaId), 20L);
+                    return;
+                }
+                File worldFolder = temporaryWorld.getWorldFolder();
+                Bukkit.getScheduler().runTaskAsynchronously(this, () -> deleteDirectory(worldFolder));
+            }
+            schematicArenaTypes.remove(arenaId);
+            schematicArenaSpawns.remove(arenaId);
+            schematicYShifts.remove(arenaId);
+            occupiedDuelArenas.remove(arenaId);
+            return;
+        }
         startArenaRestore(arenaId); // rebuild any blocks changed during the match (CPvP arenas)
         Location center = arenaCenter(arenaId);
         if (center == null || center.getWorld() == null) return;
@@ -3011,8 +3347,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Bukkit.getScheduler().runTaskLater(this, () -> {
             if (!winner.isOnline() || !loser.isOnline() || !activeDuels.containsKey(winnerId) || !activeDuels.containsKey(loserId)) return;
             String arenaId = duelArenaByPlayer.get(winnerId);
-            Location spawn1 = arenaId == null ? null : arenaSpawn(arenaId, 1);
-            Location spawn2 = arenaId == null ? null : arenaSpawn(arenaId, 2);
+            Location[] schematicSpawns = arenaId == null ? null : schematicArenaSpawns.get(arenaId);
+            Location spawn1 = schematicSpawns != null && schematicSpawns.length >= 2
+                    ? schematicSpawns[0] : (arenaId == null ? null : arenaSpawn(arenaId, 1));
+            Location spawn2 = schematicSpawns != null && schematicSpawns.length >= 2
+                    ? schematicSpawns[1] : (arenaId == null ? null : arenaSpawn(arenaId, 2));
             if (spawn1 != null && spawn2 != null) {
                 winner.teleport(spawn1);
                 loser.teleport(spawn2);
@@ -3067,5 +3406,177 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 return Bukkit.getOnlinePlayers().stream().map(Player::getName).filter(v -> v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
         }
         return Collections.emptyList();
+    }
+}
+
+final class LitematicArenaLoader {
+    record Placement(int x, int y, int z, int paletteIndex) {}
+    record SpawnPoint(int x, int y, int z) {}
+    record Schematic(List<String> palette, List<Placement> placements,
+                     List<SpawnPoint> spawnPoints, int yShift, int sizeX, int sizeY, int sizeZ) {}
+
+    private LitematicArenaLoader() {}
+
+    static Schematic read(File file) throws IOException {
+        if (file == null || !file.isFile()) throw new IOException("Schematic file is missing.");
+        Map<String, Object> root;
+        try (DataInputStream in = new DataInputStream(new BufferedInputStream(
+                new GZIPInputStream(new FileInputStream(file))))) {
+            int rootType = in.readUnsignedByte();
+            if (rootType != 10) throw new IOException("Not a valid Litematica NBT compound.");
+            in.readUTF();
+            Object payload = readPayload(in, rootType);
+            if (!(payload instanceof Map<?, ?> map)) throw new IOException("Invalid NBT root.");
+            root = castMap(map);
+        }
+
+        Object regionsObject = root.get("Regions");
+        if (!(regionsObject instanceof Map<?, ?> regions) || regions.isEmpty()) {
+            throw new IOException("No region was found in the Litematic file.");
+        }
+        Map<String, Object> region = castMap((Map<?, ?>) regions.values().iterator().next());
+        Map<String, Object> size = castMap((Map<?, ?>) region.get("Size"));
+        Map<String, Object> position = castMap((Map<?, ?>) region.get("Position"));
+        int rawX = number(size.get("x")).intValue();
+        int rawY = number(size.get("y")).intValue();
+        int rawZ = number(size.get("z")).intValue();
+        int sx = Math.abs(rawX), sy = Math.abs(rawY), sz = Math.abs(rawZ);
+        if (sx <= 0 || sy <= 0 || sz <= 0 || (long) sx * sy * sz > 2_000_000L) {
+            throw new IOException("Invalid or excessively large schematic dimensions.");
+        }
+        int minX = number(position.get("x")).intValue() + (rawX < 0 ? rawX + 1 : 0);
+        int minY = number(position.get("y")).intValue() + (rawY < 0 ? rawY + 1 : 0);
+        int minZ = number(position.get("z")).intValue() + (rawZ < 0 ? rawZ + 1 : 0);
+
+        Object paletteObject = region.get("BlockStatePalette");
+        if (!(paletteObject instanceof List<?> paletteTags) || paletteTags.isEmpty()) {
+            throw new IOException("The schematic has no block palette.");
+        }
+        List<String> palette = new ArrayList<>(paletteTags.size());
+        int goldIndex = -1;
+        for (int i = 0; i < paletteTags.size(); i++) {
+            Map<String, Object> state = castMap((Map<?, ?>) paletteTags.get(i));
+            String name = String.valueOf(state.getOrDefault("Name", "minecraft:air"));
+            StringBuilder blockData = new StringBuilder(name);
+            Object propertiesObject = state.get("Properties");
+            if (propertiesObject instanceof Map<?, ?> properties && !properties.isEmpty()) {
+                blockData.append('[');
+                boolean first = true;
+                for (Map.Entry<?, ?> entry : properties.entrySet()) {
+                    if (!first) blockData.append(',');
+                    first = false;
+                    blockData.append(entry.getKey()).append('=').append(entry.getValue());
+                }
+                blockData.append(']');
+            }
+            palette.add(blockData.toString());
+            if (name.equals("minecraft:gold_block")) goldIndex = i;
+        }
+
+        Object statesObject = region.get("BlockStates");
+        if (!(statesObject instanceof long[] states)) throw new IOException("Missing packed block states.");
+        int bits = Math.max(2, 32 - Integer.numberOfLeadingZeros(palette.size() - 1));
+        long volumeLong = (long) sx * sy * sz;
+        if (volumeLong > Integer.MAX_VALUE) throw new IOException("Schematic is too large.");
+        int volume = (int) volumeLong;
+        if (states.length < ((long) volume * bits + 63L) / 64L) {
+            throw new IOException("The schematic's block-state data is incomplete.");
+        }
+        long mask = (1L << bits) - 1L;
+        List<Placement> placements = new ArrayList<>();
+        List<SpawnPoint> gold = new ArrayList<>(2);
+        for (int index = 0; index < volume; index++) {
+            long bitIndex = (long) index * bits;
+            int longIndex = (int) (bitIndex >>> 6);
+            int offset = (int) (bitIndex & 63L);
+            long value = states[longIndex] >>> offset;
+            if (offset + bits > 64) value |= states[longIndex + 1] << (64 - offset);
+            int paletteIndex = (int) (value & mask);
+            if (paletteIndex < 0 || paletteIndex >= palette.size()) {
+                throw new IOException("Invalid palette index in schematic.");
+            }
+            int x = index % sx;
+            int y = (index / sx) % sy;
+            int z = index / (sx * sy);
+            if (paletteIndex != 0 && !palette.get(paletteIndex).startsWith("minecraft:air")) {
+                placements.add(new Placement(minX + x, minY + y, minZ + z, paletteIndex));
+            }
+            if (paletteIndex == goldIndex && gold.size() < 3) {
+                gold.add(new SpawnPoint(minX + x, minY + y, minZ + z));
+            }
+        }
+        if (gold.size() != 2) {
+            throw new IOException("Expected exactly two gold-block spawn markers, found " + gold.size() + ".");
+        }
+        int floorY = gold.get(0).y();
+        if (gold.get(1).y() != floorY) throw new IOException("The two gold-block spawn markers must be at the same height.");
+        int shift = -floorY;
+        List<SpawnPoint> shiftedGold = new ArrayList<>(2);
+        for (SpawnPoint point : gold) shiftedGold.add(new SpawnPoint(point.x(), point.y() + shift, point.z()));
+        return new Schematic(List.copyOf(palette), List.copyOf(placements), List.copyOf(shiftedGold),
+                shift, sx, sy, sz);
+    }
+
+    private static Number number(Object value) throws IOException {
+        if (value instanceof Number number) return number;
+        throw new IOException("Malformed schematic size/position tag.");
+    }
+
+    private static Map<String, Object> castMap(Map<?, ?> source) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : source.entrySet()) result.put(String.valueOf(entry.getKey()), entry.getValue());
+        return result;
+    }
+
+    private static Object readPayload(DataInputStream in, int type) throws IOException {
+        return switch (type) {
+            case 1 -> in.readByte();
+            case 2 -> in.readShort();
+            case 3 -> in.readInt();
+            case 4 -> in.readLong();
+            case 5 -> in.readFloat();
+            case 6 -> in.readDouble();
+            case 7 -> {
+                int length = in.readInt();
+                if (length < 0 || length > 64_000_000) throw new IOException("Invalid NBT byte array.");
+                byte[] bytes = new byte[length];
+                in.readFully(bytes);
+                yield bytes;
+            }
+            case 8 -> in.readUTF();
+            case 9 -> {
+                int childType = in.readUnsignedByte();
+                int length = in.readInt();
+                if (length < 0 || length > 2_000_000) throw new IOException("Invalid NBT list.");
+                List<Object> list = new ArrayList<>(length);
+                for (int i = 0; i < length; i++) list.add(readPayload(in, childType));
+                yield list;
+            }
+            case 10 -> {
+                Map<String, Object> compound = new LinkedHashMap<>();
+                while (true) {
+                    int childType = in.readUnsignedByte();
+                    if (childType == 0) break;
+                    String name = in.readUTF();
+                    compound.put(name, readPayload(in, childType));
+                }
+                yield compound;
+            }
+            case 11 -> {
+                int length = in.readInt();
+                if (length < 0 || length > 2_000_000) throw new IOException("Invalid NBT int array.");
+                int[] values = new int[length];
+                for (int i = 0; i < length; i++) values[i] = in.readInt();
+                yield values;
+            }
+            case 12 -> {
+                int length = in.readInt();
+                if (length < 0 || length > 2_000_000) throw new IOException("Invalid NBT long array.");
+                long[] values = new long[length];
+                for (int i = 0; i < length; i++) values[i] = in.readLong();
+                yield values;
+            }
+            default -> throw new IOException("Unsupported NBT tag type " + type + ".");
+        };
     }
 }
