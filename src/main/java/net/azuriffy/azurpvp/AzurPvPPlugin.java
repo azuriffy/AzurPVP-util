@@ -102,6 +102,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             saveConfig();
         }
         ensureDefaultKits();
+        addWoodenSwordToKits();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
         for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "cmode")) {
@@ -1049,6 +1050,27 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 }
                 return true;
             }
+            if(a.length >= 2 && a[0].equalsIgnoreCase("create")) {
+                if(!isDev(p)) { tell(p,"&cOnly the owner can create kits."); return true; }
+                String kitName=normalizeKitName(a[1]);
+                if(kitName.isBlank()) { tell(p,"&cUse /kit create <name>"); return true; }
+                if(getConfig().contains("kits."+kitName)) { tell(p,"&cKit &f"+kitName+" &calready exists. Load it with &f/kit "+kitName+"&c, change it, then &f/kit upload "+kitName+"&c. To start from empty, &f/kit delete "+kitName+" &cfirst."); return true; }
+                getConfig().set("kits."+kitName+".contents", new ItemStack[36]);
+                getConfig().set("kits."+kitName+".armor", new ItemStack[4]);
+                getConfig().set("kits."+kitName+".cooldown-seconds", 0);
+                saveConfig(); reloadConfig();
+                tell(p,"&aCreated empty kit &f"+kitName+"&a. Load it with &f/kit "+kitName+"&a, fill your inventory, then run &f/kit upload "+kitName+"&a.");
+                return true;
+            }
+            if(a.length >= 2 && a[0].equalsIgnoreCase("delete")) {
+                if(!isDev(p)) { tell(p,"&cOnly the owner can delete kits."); return true; }
+                String kitName=normalizeKitName(a[1]);
+                if(!getConfig().contains("kits."+kitName)) { tell(p,"&cNo kit named &f"+kitName+"&c."); return true; }
+                getConfig().set("kits."+kitName, null);
+                saveConfig(); reloadConfig();
+                tell(p,"&aDeleted kit &f"+kitName+"&a.");
+                return true;
+            }
             if(a.length >= 2 && a[0].equalsIgnoreCase("upload")) {
                 if(!isDev(p)) { tell(p,"&cOnly the owner can upload kits."); return true; }
                 String kitName=normalizeKitName(a[1]);
@@ -1060,7 +1082,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 ItemStack[] uploaded = new ItemStack[36];
                 for (int i = 0; i < 36; i++) {
                     ItemStack item = i < playerContents.length ? playerContents[i] : null;
-                    uploaded[i] = (item == null || isDuelItem(item) || isKitEditor(item)) ? null : item.clone();
+                    uploaded[i] = (item == null || isLobbyItem(item)) ? null : item.clone();
                 }
                 getConfig().set("kits."+kitName+".contents", uploaded);
                 getConfig().set("kits."+kitName+".armor", p.getInventory().getArmorContents());
@@ -1080,7 +1102,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 tell(p, "&aLoaded kit &f" + kitName + "&a. Run &f/kit clear &atwice to get your Duel sword and Kit editor back.");
                 return true;
             }
-            tell(p, isDev(p) ? "&cUse /kit <name>, /kit upload <name> or /kit clear." : "&cKit commands are unavailable. Use the Duel sword to select a kit.");
+            tell(p, isDev(p) ? "&cUse /kit <name>, /kit create <name>, /kit upload <name>, /kit delete <name> or /kit clear." : "&cKit commands are unavailable. Use the Duel sword to select a kit.");
             return true;
         }
         if(n.equals("duel")) {
@@ -1504,6 +1526,29 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         };
     }
     private Material kitIcon(String key) { return kitIconItem(key).getType(); }
+    // One-time migration: kits already saved in config.yml don't pick up changes to the defaults,
+    // so put a wooden sword into the first empty storage slot of these kits (skipped if one is already there).
+    private void addWoodenSwordToKits() {
+        if (getConfig().getBoolean("migrations.wooden-sword-kits-v1", false)) return;
+        for (String kit : List.of("spear_mace", "diamond_smp", "diamond_pot", "neth_pot")) {
+            String path = "kits." + kit + ".contents";
+            if (!getConfig().contains("kits." + kit)) continue;
+            List<?> existing = getConfig().getList(path);
+            ItemStack[] contents = new ItemStack[36];
+            if (existing != null) for (int i = 0; i < Math.min(36, existing.size()); i++) if (existing.get(i) instanceof ItemStack it) contents[i] = it;
+            boolean has = false;
+            for (ItemStack it : contents) if (it != null && it.getType() == Material.WOODEN_SWORD) { has = true; break; }
+            if (has) continue;
+            boolean placed = false;
+            for (int i = 0; i < 36; i++) {
+                if (contents[i] == null || contents[i].getType() == Material.AIR) { contents[i] = new ItemStack(Material.WOODEN_SWORD); placed = true; break; }
+            }
+            if (placed) getConfig().set(path, contents);
+            else getLogger().warning("Kit " + kit + " has no free slot for the wooden sword.");
+        }
+        getConfig().set("migrations.wooden-sword-kits-v1", true);
+        saveConfig();
+    }
     private void ensureDefaultKits() {
         String[] names={"sword","axe","mace","spear_mace","diamond_pot","neth_pot","uhc","diamond_smp","vanilla"};
         for(String name:names) if(!getConfig().contains("kits."+name)) {
@@ -1511,11 +1556,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             switch(name) {
                 case "sword" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.SHIELD); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
                 case "axe" -> { contents[0]=new ItemStack(Material.DIAMOND_AXE); contents[1]=new ItemStack(Material.SHIELD); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
-                case "mace","spear_mace" -> { contents[0]=new ItemStack(Material.MACE); contents[1]=new ItemStack(Material.WIND_CHARGE,16); contents[2]=new ItemStack(Material.ENDER_PEARL,8); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); }
-                case "diamond_pot" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); contents[3]=new ItemStack(Material.GOLDEN_APPLE,16); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
-                case "neth_pot" -> { contents[0]=new ItemStack(Material.NETHERITE_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); armor[0]=new ItemStack(Material.NETHERITE_BOOTS); armor[1]=new ItemStack(Material.NETHERITE_LEGGINGS); armor[2]=new ItemStack(Material.NETHERITE_CHESTPLATE); armor[3]=new ItemStack(Material.NETHERITE_HELMET); }
+                case "mace" -> { contents[0]=new ItemStack(Material.MACE); contents[1]=new ItemStack(Material.WIND_CHARGE,16); contents[2]=new ItemStack(Material.ENDER_PEARL,8); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); }
+                case "spear_mace" -> { contents[0]=new ItemStack(Material.MACE); contents[1]=new ItemStack(Material.WIND_CHARGE,16); contents[2]=new ItemStack(Material.ENDER_PEARL,8); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); contents[4]=new ItemStack(Material.WOODEN_SWORD); }
+                case "diamond_pot" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); contents[3]=new ItemStack(Material.GOLDEN_APPLE,16); contents[4]=new ItemStack(Material.WOODEN_SWORD); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
+                case "neth_pot" -> { contents[0]=new ItemStack(Material.NETHERITE_SWORD); contents[1]=new ItemStack(Material.SPLASH_POTION,16); contents[2]=new ItemStack(Material.ENDER_PEARL,16); contents[3]=new ItemStack(Material.WOODEN_SWORD); armor[0]=new ItemStack(Material.NETHERITE_BOOTS); armor[1]=new ItemStack(Material.NETHERITE_LEGGINGS); armor[2]=new ItemStack(Material.NETHERITE_CHESTPLATE); armor[3]=new ItemStack(Material.NETHERITE_HELMET); }
                 case "uhc" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.BOW); contents[2]=new ItemStack(Material.ARROW,32); contents[3]=new ItemStack(Material.GOLDEN_APPLE,8); contents[4]=new ItemStack(Material.WATER_BUCKET); contents[5]=new ItemStack(Material.LAVA_BUCKET); }
-                case "diamond_smp" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.DIAMOND_PICKAXE); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
+                case "diamond_smp" -> { contents[0]=new ItemStack(Material.DIAMOND_SWORD); contents[1]=new ItemStack(Material.DIAMOND_PICKAXE); contents[2]=new ItemStack(Material.GOLDEN_APPLE,8); contents[3]=new ItemStack(Material.WOODEN_SWORD); armor[0]=new ItemStack(Material.DIAMOND_BOOTS); armor[1]=new ItemStack(Material.DIAMOND_LEGGINGS); armor[2]=new ItemStack(Material.DIAMOND_CHESTPLATE); armor[3]=new ItemStack(Material.DIAMOND_HELMET); }
                 default -> { contents[0]=new ItemStack(Material.IRON_SWORD); contents[1]=new ItemStack(Material.BOW); contents[2]=new ItemStack(Material.ARROW,32); contents[3]=new ItemStack(Material.COOKED_BEEF,16); }
             }
             getConfig().set("kits."+name+".contents",contents); getConfig().set("kits."+name+".armor",armor); getConfig().set("kits."+name+".cooldown-seconds",0);
