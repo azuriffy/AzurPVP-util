@@ -118,7 +118,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         combatTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
             updateCombat(); updateQueueActionBars();
             for (Player online : Bukkit.getOnlinePlayers()) {
-                if (inSpawnProtection(online.getLocation()) && !activeDuels.containsKey(online.getUniqueId())) {
+                if (inSpawnProtection(online.getLocation()) && !activeDuels.containsKey(online.getUniqueId()) && !partyMatchByPlayer.containsKey(online.getUniqueId())) {
                     online.setHealth(online.getMaxHealth());
                     online.setFoodLevel(20);
                     online.setSaturation(20.0f);
@@ -272,7 +272,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String role = roleOf(p.getUniqueId());
         UUID opponentId = activeDuels.get(p.getUniqueId());
         String[] lines;
-        if (opponentId != null) {
+        if (matchOf(p) != null) {
+            lines = partyMatchScoreboard(p);
+        } else if (opponentId != null) {
             Player opponent = Bukkit.getPlayer(opponentId);
             int yours = duelRoundWins.getOrDefault(p.getUniqueId(), 0);
             int theirs = duelRoundWins.getOrDefault(opponentId, 0);
@@ -619,7 +621,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void onQuit(PlayerQuitEvent e) {
         Player p=e.getPlayer(); e.setQuitMessage(c("&8[&c-&8] &d"+p.getName()));
-        if (tagged(p) && !activeDuels.containsKey(p.getUniqueId()) && getConfig().getBoolean("combat.punish-logout",true) && !p.hasPermission("azurpvp.bypass.combattag")) {
+        if (tagged(p) && !activeDuels.containsKey(p.getUniqueId()) && !partyMatchByPlayer.containsKey(p.getUniqueId()) && getConfig().getBoolean("combat.punish-logout",true) && !p.hasPermission("azurpvp.bypass.combattag")) {
             if ("KILL".equalsIgnoreCase(getConfig().getString("combat.punishment","KILL"))) p.setHealth(0.0);
             else for (ItemStack item : p.getInventory().getContents()) if (item != null) p.getWorld().dropItemNaturally(p.getLocation(),item);
         }
@@ -700,7 +702,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void protectSpawnFromAllDamage(org.bukkit.event.entity.EntityDamageEvent e) {
         if (e.getEntity() instanceof Player player && inSpawnProtection(player.getLocation())
-                && !activeDuels.containsKey(player.getUniqueId())) {
+                && !activeDuels.containsKey(player.getUniqueId()) && !partyMatchByPlayer.containsKey(player.getUniqueId())) {
             e.setCancelled(true);
         }
     }
@@ -745,7 +747,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     // normally; the player must manually place another totem in a hand to use it.
 
     @EventHandler public void onDeath(PlayerDeathEvent e) {
-        if (activeDuels.containsKey(e.getEntity().getUniqueId())) return; // duels are tracked separately
+        if (activeDuels.containsKey(e.getEntity().getUniqueId()) || partyMatchByPlayer.containsKey(e.getEntity().getUniqueId())) return; // duels and party matches are tracked separately
         Player victim=e.getEntity(); Player killer=victim.getKiller();
         stat(victim.getUniqueId(),"deaths",1); stat(victim.getUniqueId(),"streak",-getStat(victim.getUniqueId(),"streak"));
         if(killer!=null && !killer.equals(victim)) {
@@ -877,6 +879,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
             openLeaderboards(p); return true;
         }
+        if(n.equals("azurpvp") && a.length >= 2 && a[0].equalsIgnoreCase("goldenhead") && a[1].equalsIgnoreCase("texture")) { setGoldenHeadTextureFromHand(s); return true; }
         if(n.equals("azurpvp")) { tell(s,"&dAzurPvP Utils &8— &fPaper 1.21.11"); tell(s,"&7Use &d/help &7to privately view the commands available to your role."); return true; }
         if(n.equals("world")) {
             if (!isDev(s)) { tell(s, "&cOnly the owner can manage worlds."); return true; }
@@ -964,9 +967,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if(n.equals("set")) {
             if(!isDev(s)){tell(s,"&cOnly the owner can configure arena spawns.");return true;}
-            if(!(s instanceof Player p)||a.length!=4||!a[0].equalsIgnoreCase("arena")||!a[1].equalsIgnoreCase("spawn")){tell(s,"&cUsage: /set arena spawn <arena number> <spawn 1|2>");return true;}
+            if(!(s instanceof Player p)||a.length!=4||!a[0].equalsIgnoreCase("arena")||!a[1].equalsIgnoreCase("spawn")){tell(s,"&cUsage: /set arena spawn <arena number> <spawn 1-8>");return true;}
             int id,which;try{id=Integer.parseInt(a[2]);which=Integer.parseInt(a[3]);}catch(NumberFormatException ex){tell(s,"&cArena and spawn numbers must be integers.");return true;}
-            if(which<1||which>2||!getConfig().contains("arenas."+id)){tell(p,"&cArena does not exist or spawn must be 1 or 2.");return true;}
+            if(which<1||which>8||!getConfig().contains("arenas."+id)){tell(p,"&cArena does not exist or spawn must be 1-8 (spawns 3-8 are optional extra FFA spawns).");return true;}
             Location l=p.getLocation();String path="arenas."+id+".spawn"+which;getConfig().set(path+".world",l.getWorld().getName());getConfig().set(path+".x",l.getX());getConfig().set(path+".y",l.getY());getConfig().set(path+".z",l.getZ());getConfig().set(path+".yaw",l.getYaw());getConfig().set(path+".pitch",l.getPitch());saveConfig();tell(p,"&aSaved arena "+id+" spawn "+which+".");return true;
         }
         if(n.equals("cpvparena")) {
@@ -1459,6 +1462,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 boolean queued = duelQueue.getOrDefault(p.getUniqueId(), new LinkedHashMap<>()).containsKey(normalizeKitName(key));
                 List<String> lore = new ArrayList<>();
                 if (mode.equals("editor")) lore.add(c("&7Click to edit your personal version"));
+                else if (mode.startsWith("party")) lore.add(c("&7Click to start a party " + (mode.equals("partyffa") ? "FFA" : "team duel") + " with this kit"));
                 else {
                     lore.add(c(queued ? "&a✔ QUEUED" : "&7Click to queue for this kit"));
                     lore.add(c(queued ? "&eClick again to leave this queue" : "&7You can queue for multiple kits"));
@@ -1564,6 +1568,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             getConfig().set("migrations.golden-head-uhc-v1", true);
             changed = true;
         }
+        if (refreshGoldenHeads()) changed = true;
         if (changed) saveConfig();
     }
     // Puts a wooden sword in the first empty storage slot at the given contents path (skipped if one is already there).
@@ -1626,7 +1631,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             boolean bypass = cmodeWorlds.contains(wn);
             for (Player pl : Bukkit.getOnlinePlayers()) {
                 UUID id = pl.getUniqueId();
-                boolean busy = activeDuels.containsKey(id) || spectating.containsKey(id) || pendingDuelLosers.contains(id);
+                boolean busy = activeDuels.containsKey(id) || spectating.containsKey(id) || pendingDuelLosers.contains(id) || partyMatchByPlayer.containsKey(id);
                 boolean inLobby = pl.getWorld().equals(lobby) && !inCpvpRegion(pl.getLocation());
                 if (inLobby && !bypass && !busy && pl.getGameMode() == GameMode.SURVIVAL) {
                     pl.setGameMode(GameMode.ADVENTURE);
@@ -1648,7 +1653,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private void startLobbyItemGuard() {
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             for (Player online : Bukkit.getOnlinePlayers()) {
-                if (activeDuels.containsKey(online.getUniqueId()) || spectating.containsKey(online.getUniqueId()) || pendingDuelLosers.contains(online.getUniqueId()) || kitLoaded.contains(online.getUniqueId())) continue;
+                if (activeDuels.containsKey(online.getUniqueId()) || spectating.containsKey(online.getUniqueId()) || pendingDuelLosers.contains(online.getUniqueId()) || kitLoaded.contains(online.getUniqueId()) || partyMatchByPlayer.containsKey(online.getUniqueId())) continue;
                 if (online.getGameMode() != GameMode.SURVIVAL && online.getGameMode() != GameMode.ADVENTURE) continue;
                 if (!inSpawnProtection(online.getLocation())) continue;
                 org.bukkit.inventory.PlayerInventory inv = online.getInventory();
@@ -1886,7 +1891,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler(ignoreCancelled = true) public void onSpectatorTeleport(PlayerTeleportEvent e) {
         // Stop spectators using the spectator menu to teleport out of the match.
-        if (e.getCause() == PlayerTeleportEvent.TeleportCause.SPECTATE && spectating.containsKey(e.getPlayer().getUniqueId())) e.setCancelled(true);
+        if (e.getCause() == PlayerTeleportEvent.TeleportCause.SPECTATE && (spectating.containsKey(e.getPlayer().getUniqueId()) || partyMatchByPlayer.containsKey(e.getPlayer().getUniqueId()))) e.setCancelled(true);
     }
     @EventHandler public void onKitLoadedQuit(PlayerQuitEvent e) { kitLoaded.remove(e.getPlayer().getUniqueId()); autoAdventure.remove(e.getPlayer().getUniqueId()); }
     @EventHandler public void onSpectatorQuit(PlayerQuitEvent e) {
@@ -1917,6 +1922,48 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         return head;
     }
+    private final Map<UUID, Long> goldenHeadEating = new ConcurrentHashMap<>();
+    // /azurpvp goldenhead texture: copies the skin of the custom head you are holding into config.yml.
+    private void setGoldenHeadTextureFromHand(CommandSender s) {
+        if (!isDev(s)) { tell(s, "&cOnly the owner can do that."); return; }
+        if (!(s instanceof Player p)) { tell(s, "&cHold the head in-game."); return; }
+        ItemStack held = p.getInventory().getItemInMainHand();
+        String value = null;
+        if (held.getType() == Material.PLAYER_HEAD && held.getItemMeta() instanceof org.bukkit.inventory.meta.SkullMeta sm && sm.getPlayerProfile() != null) {
+            for (com.destroystokyo.paper.profile.ProfileProperty prop : sm.getPlayerProfile().getProperties()) if (prop.getName().equals("textures")) { value = prop.getValue(); break; }
+        }
+        if (value == null) { tell(p, "&cHold a custom-skin player head in your main hand first."); return; }
+        getConfig().set("golden-head-texture", value);
+        refreshGoldenHeads();
+        saveConfig();
+        tell(p, "&aGolden Head texture saved. Golden heads already in kits were updated too.");
+    }
+    // Re-skins every golden head stored in server kits and personal kits with the current texture.
+    private boolean refreshGoldenHeads() {
+        boolean changed = false;
+        List<String> paths = new ArrayList<>();
+        ConfigurationSection ks = getConfig().getConfigurationSection("kits");
+        if (ks != null) for (String k : ks.getKeys(false)) paths.add("kits." + k + ".contents");
+        ConfigurationSection pk = getConfig().getConfigurationSection("player-kits");
+        if (pk != null) for (String uuid : pk.getKeys(false)) {
+            ConfigurationSection mine = pk.getConfigurationSection(uuid);
+            if (mine != null) for (String k : mine.getKeys(false)) paths.add("player-kits." + uuid + "." + k + ".contents");
+        }
+        for (String path : paths) {
+            List<?> list = getConfig().getList(path);
+            if (list == null) continue;
+            List<Object> updated = new ArrayList<>(list);
+            boolean local = false;
+            for (int i = 0; i < updated.size(); i++) {
+                if (updated.get(i) instanceof ItemStack it && isGoldenHead(it)) {
+                    ItemStack fresh = goldenHeadItem(it.getAmount());
+                    if (!fresh.isSimilar(it)) { updated.set(i, fresh); local = true; }
+                }
+            }
+            if (local) { getConfig().set(path, updated); changed = true; }
+        }
+        return changed;
+    }
     private boolean isGoldenHead(ItemStack item) {
         return item != null && item.getType() == Material.PLAYER_HEAD && item.hasItemMeta() && item.getItemMeta().hasDisplayName() && c("&6&lGolden Head").equals(item.getItemMeta().getDisplayName());
     }
@@ -1925,18 +1972,32 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (!isGoldenHead(e.getItem()) || e.getHand() == null) return;
         e.setCancelled(true); // stop the head from being placed as a block
         Player p = e.getPlayer();
-        if (p.getGameMode() == GameMode.SPECTATOR || duelCountdown.contains(p.getUniqueId())) return;
-        ItemStack inHand = p.getInventory().getItem(e.getHand());
-        if (!isGoldenHead(inHand)) return;
-        if (inHand.getAmount() <= 1) p.getInventory().setItem(e.getHand(), null); else inHand.setAmount(inHand.getAmount() - 1);
-        p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.REGENERATION, 180, 1));
-        p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.ABSORPTION, 2400, 0));
+        UUID id = p.getUniqueId();
+        if (p.getGameMode() == GameMode.SPECTATOR || duelCountdown.contains(id)) return;
+        long now = System.currentTimeMillis();
+        if (goldenHeadEating.getOrDefault(id, 0L) > now) return; // already eating one
+        goldenHeadEating.put(id, now + 1000L);
+        final org.bukkit.inventory.EquipmentSlot hand = e.getHand();
+        var legacy = net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection();
+        p.sendActionBar(legacy.deserialize(c("&6Eating Golden Head... &7(1s)")));
         p.playSound(p.getLocation(), org.bukkit.Sound.ENTITY_GENERIC_EAT, 1.0f, 1.0f);
+        // 1 second eating timer: the head is only consumed if it is still in the same hand afterwards.
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            goldenHeadEating.remove(id);
+            if (!p.isOnline() || p.isDead() || p.getGameMode() == GameMode.SPECTATOR) return;
+            ItemStack held = p.getInventory().getItem(hand);
+            if (!isGoldenHead(held)) { p.sendActionBar(legacy.deserialize(c("&cEating cancelled"))); return; }
+            if (held.getAmount() <= 1) p.getInventory().setItem(hand, null); else held.setAmount(held.getAmount() - 1);
+            p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.REGENERATION, 180, 1));
+            p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.ABSORPTION, 2400, 0));
+            p.playSound(p.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_BURP, 1.0f, 1.0f);
+        }, 20L);
     }
 
     // ---------- Parties ----------
     private static final class Party {
         UUID leader;
+        PartyMatch match; // non-null while the party is playing an FFA / team match
         final LinkedHashSet<UUID> members = new LinkedHashSet<>();
         Party(UUID leader) { this.leader = leader; members.add(leader); }
     }
@@ -1962,7 +2023,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     // Gives/takes the lobby hotbar items after a party change. Players mid-duel are fixed when their duel ends.
     private void refreshPartyItems(Player p) {
         UUID id = p.getUniqueId();
-        if (!p.isOnline() || activeDuels.containsKey(id) || spectating.containsKey(id) || pendingDuelLosers.contains(id) || kitLoaded.contains(id)) return;
+        if (!p.isOnline() || activeDuels.containsKey(id) || spectating.containsKey(id) || pendingDuelLosers.contains(id) || kitLoaded.contains(id) || partyMatchByPlayer.containsKey(id)) return;
         giveDuelItem(p);
         givePartyItem(p);
     }
@@ -2022,6 +2083,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (chosen == null) { tell(p, "&cNo matching party invite."); return; }
         Party party = partyByPlayer.get(chosen);
         if (party == null) { mine.remove(chosen); tell(p, "&cThat party no longer exists."); return; }
+        if (party.match != null) { tell(p, "&cThat party is in a match right now."); return; }
         if (party.members.size() >= partyMaxSize()) { tell(p, "&cThat party is full."); return; }
         party.members.add(p.getUniqueId());
         partyByPlayer.put(p.getUniqueId(), party);
@@ -2049,10 +2111,17 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
     }
     private void leaveParty(Player p) {
-        if (partyOf(p) == null) { tell(p, "&cYou are not in a party."); return; }
+        Party current = partyOf(p);
+        if (current == null) { tell(p, "&cYou are not in a party."); return; }
+        if (current.match != null) { tell(p, "&cYou can't leave the party during a match."); return; }
         removeFromParty(p.getUniqueId(), "leave");
     }
     private void disbandParty(Party party) {
+        if (party.match != null) {
+            Player lp = Bukkit.getPlayer(party.leader);
+            if (lp != null) tell(lp, "&cYou can't disband the party during a match.");
+            return;
+        }
         List<UUID> ids = new ArrayList<>(party.members);
         for (UUID id : ids) partyByPlayer.remove(id);
         party.members.clear();
@@ -2067,6 +2136,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         Party party = partyOf(leader);
         if (party == null) { tell(leader, "&cYou are not in a party."); return; }
         if (!party.leader.equals(leader.getUniqueId())) { tell(leader, "&cOnly the party leader can kick players."); return; }
+        if (party.match != null) { tell(leader, "&cYou can't kick players during a match."); return; }
         Player target = Bukkit.getPlayerExact(targetName);
         if (target == null || !party.members.contains(target.getUniqueId())) { tell(leader, "&cThat player is not in your party."); return; }
         if (target.equals(leader)) { tell(leader, "&cUse &f/party disband &cor &f/party leave &cinstead."); return; }
@@ -2116,8 +2186,14 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 party.leader = t.getUniqueId();
                 partyBroadcast(party, "&d" + t.getName() + " &7is now the party leader.");
             }
+            case "ffa", "duel", "teams" -> {
+                if (a.length < 2) { tell(p, "&cUsage: /party " + a[0].toLowerCase(Locale.ROOT) + " <kit>"); return; }
+                String kit = normalizeKitName(a[1]);
+                if (!getConfig().contains("kits." + kit)) { tell(p, "&cUnknown kit."); return; }
+                startPartyMatch(p, kit, a[0].equalsIgnoreCase("ffa") ? PartyMode.FFA : PartyMode.TEAMS);
+            }
             case "list", "info" -> listParty(p);
-            default -> tell(p, "&dParty: &f/party create, disband, invite <player>, accept [player], deny, leave, kick <player>, promote <player>, list &7(or click the cake)");
+            default -> tell(p, "&dParty: &f/party create, disband, invite <player>, accept [player], deny, leave, kick <player>, promote <player>, ffa <kit>, duel <kit> (teams), list &7(or click the cake)");
         }
     }
     private void openParty(Player p) {
@@ -2143,7 +2219,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                 inv.setItem(12, namedItem(Material.NAME_TAG, "&a&lInvite Player", List.of("&7Pick an online player to invite")));
                 inv.setItem(14, namedItem(Material.IRON_BOOTS, "&c&lKick Member", List.of("&7Remove a player from the party")));
                 inv.setItem(16, namedItem(Material.TNT, "&c&lDisband Party", List.of("&7Close the party for everyone")));
-                inv.setItem(22, namedItem(Material.OAK_DOOR, "&e&lLeave Party", List.of("&7Leadership passes to the next member")));
+                inv.setItem(20, namedItem(Material.DIAMOND_AXE, "&6&lParty FFA", List.of("&7Everyone fights everyone", "&7Last player standing wins", "&8Click to pick a kit")));
+                inv.setItem(22, namedItem(Material.DIAMOND_SWORD, "&b&lParty Duel &8(&fTeams&8)", List.of("&7Party is split into two teams", "&7Last team standing wins", "&8Click to pick a kit")));
+                inv.setItem(24, namedItem(Material.OAK_DOOR, "&e&lLeave Party", List.of("&7Leadership passes to the next member")));
             } else {
                 inv.setItem(16, namedItem(Material.OAK_DOOR, "&e&lLeave Party", List.of("&7Leave this party")));
             }
@@ -2190,8 +2268,247 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void onPartyQuit(PlayerQuitEvent e) {
         UUID id = e.getPlayer().getUniqueId();
+        quitPartyMatch(e.getPlayer());
         removeFromParty(id, "quit");
         partyInvites.remove(id);
+    }
+
+    // ---------- Party matches (FFA / team duel) ----------
+    private enum PartyMode { FFA, TEAMS }
+    private static final class PartyMatch {
+        final Party party; final PartyMode mode; final String kit; final String arena;
+        final Map<UUID, Integer> team = new HashMap<>();       // TEAMS: 0 or 1; FFA: unique number per player
+        final Set<UUID> participants = new LinkedHashSet<>();
+        final Set<UUID> alive = ConcurrentHashMap.newKeySet();
+        volatile boolean started, ended;
+        PartyMatch(Party party, PartyMode mode, String kit, String arena) { this.party = party; this.mode = mode; this.kit = kit; this.arena = arena; }
+    }
+    private final Map<UUID, PartyMatch> partyMatchByPlayer = new ConcurrentHashMap<>();
+
+    private PartyMatch matchOf(Player p) { return partyMatchByPlayer.get(p.getUniqueId()); }
+    private void matchBroadcast(PartyMatch m, String msg) {
+        for (UUID id : m.participants) { Player pl = Bukkit.getPlayer(id); if (pl != null) tell(pl, msg); }
+    }
+    private String[] partyMatchScoreboard(Player p) {
+        PartyMatch m = matchOf(p);
+        return new String[] {
+            "&7Online: &d" + Bukkit.getOnlinePlayers().size(),
+            "&dPlayer: &f" + p.getName(),
+            "&7Ping: &a" + p.getPing() + "ms",
+            "&dMode: &f" + (m.mode == PartyMode.FFA ? "Party FFA" : "Party Teams"),
+            "&dAlive: &f" + m.alive.size() + "&7/" + m.participants.size(),
+            m.mode == PartyMode.TEAMS ? "&dTeam: &f" + (m.team.getOrDefault(p.getUniqueId(), 0) + 1) : "&dKit: &f" + prettyKitName(m.kit)
+        };
+    }
+    private Player resolveAttacker(Entity damager) {
+        if (damager instanceof Player direct) return direct;
+        if (damager instanceof org.bukkit.entity.Projectile pr && pr.getShooter() instanceof Player shooter) return shooter;
+        return null;
+    }
+
+    private void startPartyMatch(Player leader, String kit, PartyMode mode) {
+        Party party = partyOf(leader);
+        if (party == null || !party.leader.equals(leader.getUniqueId())) { tell(leader, "&cOnly the party leader can start a match."); return; }
+        if (party.match != null) { tell(leader, "&cYour party is already in a match."); return; }
+        List<Player> players = new ArrayList<>();
+        for (UUID id : party.members) { Player member = Bukkit.getPlayer(id); if (member != null && member.isOnline()) players.add(member); }
+        if (players.size() < 2) { tell(leader, "&cYou need at least 2 players in your party."); return; }
+        for (Player member : players) {
+            UUID id = member.getUniqueId();
+            if (activeDuels.containsKey(id) || spectating.containsKey(id) || partyMatchByPlayer.containsKey(id)) { tell(leader, "&c" + member.getName() + " is busy right now."); return; }
+        }
+        String normalizedKit = normalizeKitName(kit);
+        if (!getConfig().contains("kits." + normalizedKit)) { tell(leader, "&cThat kit does not exist."); return; }
+        boolean vanilla = normalizedKit.equals("vanilla");
+        String arena = null;
+        for (String id : arenaKeys()) {
+            if (arenaSpawn(id, 1) == null || arenaSpawn(id, 2) == null || occupiedDuelArenas.contains(id)) continue;
+            if (vanilla == (cpvpRegionForArena(id) != null)) { arena = id; break; }
+        }
+        if (arena == null) { tell(leader, "&cAll " + (vanilla ? "CPvP " : "") + "arenas are full right now. Try again in a moment."); return; }
+
+        final PartyMatch m = new PartyMatch(party, mode, normalizedKit, arena);
+        party.match = m;
+        occupiedDuelArenas.add(arena);
+        List<Location> spawns = new ArrayList<>();
+        for (int i = 1; i <= 8; i++) { Location l = arenaSpawn(arena, i); if (l != null) spawns.add(l); }
+        Collections.shuffle(players);
+        String modeName = mode == PartyMode.FFA ? "Party FFA" : "Party team duel";
+        for (int i = 0; i < players.size(); i++) {
+            Player pl = players.get(i);
+            UUID id = pl.getUniqueId();
+            m.participants.add(id);
+            m.alive.add(id);
+            m.team.put(id, mode == PartyMode.TEAMS ? i % 2 : i);
+            partyMatchByPlayer.put(id, m);
+            duelQueue.remove(id);
+            pl.setGameMode(GameMode.SURVIVAL);
+            pl.setHealth(pl.getMaxHealth());
+            pl.setFoodLevel(20);
+            pl.sendTitle(c("&d&lMATCH READY"), c("&7" + modeName + " &8- &7teleporting in 3 seconds..."), 0, 60, 0);
+        }
+        refreshAllLobbyVisibility();
+        matchBroadcast(m, "&a" + modeName + " starting with kit &f" + prettyKitName(normalizedKit) + "&a!");
+        if (mode == PartyMode.TEAMS) {
+            for (int t = 0; t < 2; t++) {
+                List<String> names = new ArrayList<>();
+                for (UUID id : m.participants) if (m.team.get(id) == t) names.add(nameOf(id));
+                for (UUID id : m.participants) if (m.team.get(id) == t) { Player pl = Bukkit.getPlayer(id); if (pl != null) tell(pl, "&dYou are on &fTeam " + (t + 1) + "&d: &f" + String.join(", ", names)); }
+            }
+        }
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (m.ended) return;
+            int next = 0;
+            for (UUID id : new ArrayList<>(m.participants)) {
+                Player pl = Bukkit.getPlayer(id);
+                if (pl == null || !m.alive.contains(id)) continue;
+                Location spot = m.mode == PartyMode.TEAMS ? spawns.get(m.team.get(id) % 2) : spawns.get(next++ % spawns.size());
+                pl.teleport(spot);
+                arenaCombat.add(id);
+                giveDuelKit(pl, m.kit);
+                pl.setHealth(pl.getMaxHealth());
+                pl.setFoodLevel(20);
+                pl.setSaturation(0.0f);
+            }
+            for (int sec = 5; sec >= 1; sec--) {
+                final int n = sec;
+                Bukkit.getScheduler().runTaskLater(this, () -> {
+                    if (m.ended) return;
+                    for (UUID id : m.participants) { Player pl = Bukkit.getPlayer(id); if (pl != null) pl.sendTitle(c("&5&l" + n), c("&7PvP enabled in " + n), 0, 20, 0); }
+                }, (5 - sec) * 20L);
+            }
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (m.ended) return;
+                m.started = true;
+                for (UUID id : m.participants) { Player pl = Bukkit.getPlayer(id); if (pl != null) pl.sendTitle(c("&a&lFIGHT!"), c("&7Good luck"), 0, 30, 10); }
+            }, 100L);
+        }, 60L);
+    }
+
+    private void eliminateFromPartyMatch(Player loser, Player killer) {
+        PartyMatch m = matchOf(loser);
+        if (m == null || m.ended || !m.alive.remove(loser.getUniqueId())) return;
+        pendingDuelLosers.add(loser.getUniqueId());
+        if (!loser.isDead()) {
+            loser.setGameMode(GameMode.SPECTATOR);
+            Location spot = arenaSpawn(m.arena, 1);
+            if (spot != null) loser.teleport(spot);
+        }
+        matchBroadcast(m, "&c" + loser.getName() + " &7was eliminated" + (killer != null && !killer.equals(loser) ? " by &d" + killer.getName() : "") + "&7. &8(&f" + m.alive.size() + " &7left&8)");
+        loser.sendTitle(c("&c&lELIMINATED"), c("&7Spectating until the match ends"), 0, 60, 10);
+        checkPartyMatchEnd(m);
+    }
+
+    private void checkPartyMatchEnd(PartyMatch m) {
+        if (m.ended) return;
+        Set<Integer> aliveTeams = new HashSet<>();
+        for (UUID id : m.alive) aliveTeams.add(m.team.getOrDefault(id, -1));
+        boolean over = m.mode == PartyMode.TEAMS ? aliveTeams.size() <= 1 : m.alive.size() <= 1;
+        if (!over) return;
+        m.ended = true;
+        List<String> winnerNames = new ArrayList<>();
+        if (!aliveTeams.isEmpty()) {
+            int winningTeam = aliveTeams.iterator().next();
+            for (UUID id : m.participants) {
+                boolean winner = m.mode == PartyMode.TEAMS ? m.team.getOrDefault(id, -1) == winningTeam : m.alive.contains(id);
+                if (winner) winnerNames.add(nameOf(id));
+            }
+        }
+        for (UUID id : m.participants) {
+            Player pl = Bukkit.getPlayer(id);
+            if (pl == null) continue;
+            if (winnerNames.isEmpty()) pl.sendTitle(c("&7&lDRAW"), c("&7Nobody won"), 0, 80, 10);
+            else if (winnerNames.contains(pl.getName())) pl.sendTitle(c("&a&lVICTORY"), c("&7You won the match!"), 0, 80, 10);
+            else pl.sendTitle(c("&c&lDEFEAT"), c("&7Returning to spawn soon..."), 0, 80, 10);
+        }
+        matchBroadcast(m, winnerNames.isEmpty() ? "&7The match ended in a draw." : "&aWinner" + (winnerNames.size() > 1 ? "s" : "") + ": &f" + String.join(", ", winnerNames));
+        Bukkit.getScheduler().runTaskLater(this, () -> finishPartyMatch(m), 100L);
+    }
+
+    private void finishPartyMatch(PartyMatch m) {
+        m.ended = true;
+        occupiedDuelArenas.remove(m.arena);
+        if (m.party.match == m) m.party.match = null;
+        Location lobby = lobbySpawnLocation();
+        for (UUID id : new ArrayList<>(m.participants)) {
+            if (partyMatchByPlayer.get(id) != m) continue;
+            partyMatchByPlayer.remove(id);
+            pendingDuelLosers.remove(id);
+            arenaCombat.remove(id);
+            combatUntil.remove(id);
+            Player pl = Bukkit.getPlayer(id);
+            if (pl == null || !pl.isOnline()) continue;
+            pl.setGameMode(GameMode.SURVIVAL);
+            pl.getInventory().clear();
+            pl.getInventory().setArmorContents(null);
+            pl.getInventory().setItemInOffHand(null);
+            for (org.bukkit.potion.PotionEffect effect : pl.getActivePotionEffects()) pl.removePotionEffect(effect.getType());
+            pl.setFireTicks(0);
+            pl.setFallDistance(0);
+            pl.setHealth(pl.getMaxHealth());
+            pl.setFoodLevel(20);
+            pl.setSaturation(20.0f);
+            if (lobby != null) pl.teleport(lobby);
+            giveDuelItem(pl);   // party members stay in their party, so this keeps the duel sword away
+            giveKitEditor(pl);
+        }
+        Bukkit.getScheduler().runTaskLater(this, () -> cleanArenaEntities(m.arena), 1L);
+        refreshAllLobbyVisibility();
+    }
+
+    // A player disconnecting mid-match is treated as eliminated and their kit is wiped so it can't leak into the lobby.
+    private void quitPartyMatch(Player p) {
+        UUID id = p.getUniqueId();
+        PartyMatch m = partyMatchByPlayer.remove(id);
+        if (m == null) return;
+        pendingDuelLosers.remove(id);
+        arenaCombat.remove(id);
+        combatUntil.remove(id);
+        boolean wasAlive = m.alive.remove(id);
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(null);
+        p.getInventory().setItemInOffHand(null);
+        p.setGameMode(GameMode.SURVIVAL);
+        if (!m.ended && wasAlive) {
+            matchBroadcast(m, "&c" + p.getName() + " &7left the match.");
+            checkPartyMatchEnd(m);
+        }
+    }
+
+    // Everyone in a match is invulnerable until FIGHT! and after the match ends; lethal hits eliminate instead of killing.
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPartyMatchAnyDamage(org.bukkit.event.entity.EntityDamageEvent e) {
+        if (!(e.getEntity() instanceof Player victim)) return;
+        PartyMatch m = matchOf(victim);
+        if (m == null) return;
+        if (m.ended || !m.started || !m.alive.contains(victim.getUniqueId())) { e.setCancelled(true); return; }
+        if (e.getFinalDamage() < victim.getHealth()) return;
+        if (isTotem(victim.getInventory().getItemInMainHand()) || isTotem(victim.getInventory().getItemInOffHand())) return;
+        e.setCancelled(true);
+        victim.setHealth(victim.getMaxHealth());
+        Player killer = e instanceof EntityDamageByEntityEvent byEntity ? resolveAttacker(byEntity.getDamager()) : victim.getKiller();
+        eliminateFromPartyMatch(victim, killer);
+    }
+    // No hitting before the match starts, no friendly fire in team matches, and no hits between a match and outsiders.
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPartyMatchHit(EntityDamageByEntityEvent e) {
+        if (!(e.getEntity() instanceof Player victim)) return;
+        Player attacker = resolveAttacker(e.getDamager());
+        if (attacker == null || attacker.equals(victim)) return;
+        PartyMatch vm = matchOf(victim), am = matchOf(attacker);
+        if (vm == null && am == null) return;
+        if (vm != am || !vm.started || vm.ended || !vm.alive.contains(attacker.getUniqueId())) { e.setCancelled(true); return; }
+        if (vm.mode == PartyMode.TEAMS && Objects.equals(vm.team.get(attacker.getUniqueId()), vm.team.get(victim.getUniqueId()))) e.setCancelled(true);
+    }
+    // Fallback for deaths that bypass the damage handler (e.g. /kill): keep the inventory and eliminate.
+    @EventHandler public void onPartyMatchDeath(PlayerDeathEvent e) {
+        Player victim = e.getEntity();
+        if (matchOf(victim) == null) return;
+        e.setKeepInventory(true);
+        e.getDrops().clear();
+        e.setDroppedExp(0);
+        e.setDeathMessage(null);
+        eliminateFromPartyMatch(victim, victim.getKiller());
     }
 
     // ---------- Leaderboards ----------
@@ -2368,7 +2685,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
             boolean isLeader = party.leader.equals(p.getUniqueId());
             if (clickedSlot == 16 && !isLeader) { p.closeInventory(); leaveParty(p); }
-            else if (isLeader && clickedSlot == 22) { p.closeInventory(); leaveParty(p); }
+            else if (isLeader && clickedSlot == 24) { p.closeInventory(); leaveParty(p); }
+            else if (isLeader && (clickedSlot == 20 || clickedSlot == 22)) {
+                if (party.match != null) { tell(p, "&cYour party is already in a match."); return; }
+                if (party.members.size() < 2) { tell(p, "&cYou need at least 2 players in your party."); return; }
+                openKitMenu(p, clickedSlot == 20 ? "partyffa" : "partyteams", null);
+            }
             else if (isLeader && clickedSlot == 12) openPartyInviteMenu(p);
             else if (isLeader && clickedSlot == 14) openPartyKickMenu(p);
             else if (isLeader && clickedSlot == 16) { p.closeInventory(); disbandParty(party); }
@@ -2424,6 +2746,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             String kit=normalizeKitName(display); if(!getConfig().contains("kits."+kit))return;
             String mode=duelGuiMode.getOrDefault(p.getUniqueId(),"queue");
             if(mode.equals("duel")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.putIfAbsent(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
+            else if(mode.equals("partyffa") || mode.equals("partyteams")) { p.closeInventory(); startPartyMatch(p, kit, mode.equals("partyffa") ? PartyMode.FFA : PartyMode.TEAMS); }
             else if(mode.equals("challenge")) { duelChosenKits.put(p.getUniqueId(),kit); duelRounds.putIfAbsent(p.getUniqueId(),1); duelMaps.putIfAbsent(p.getUniqueId(),"random"); openDuelSettings(p); }
             else { queueForDuel(p, kit); if (!activeDuels.containsKey(p.getUniqueId())) openKitMenu(p, "queue", null); }
         } else {
@@ -2591,7 +2914,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if(cmd.getName().equalsIgnoreCase("kit") && args.length==1){ List<String> choices=new ArrayList<>(List.of("create","delete","upload")); ConfigurationSection ks=getConfig().getConfigurationSection("kits"); if(ks!=null)choices.addAll(ks.getKeys(false)); return choices.stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[0].toLowerCase(Locale.ROOT))).toList(); }
         if(cmd.getName().equalsIgnoreCase("kit") && args.length==2 && Set.of("delete","upload").contains(args[0].toLowerCase(Locale.ROOT))){ ConfigurationSection ks=getConfig().getConfigurationSection("kits"); return ks==null?Collections.emptyList():ks.getKeys(false).stream().filter(v->v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList(); }
         if(cmd.getName().equalsIgnoreCase("party")) {
-            if (args.length == 1) return List.of("create","disband","invite","accept","deny","leave","kick","promote","list").stream().filter(v -> v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+            if (args.length == 1) return List.of("create","disband","invite","accept","deny","leave","kick","promote","ffa","duel","list").stream().filter(v -> v.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+            if (args.length == 2 && Set.of("ffa","duel","teams").contains(args[0].toLowerCase(Locale.ROOT))) {
+                ConfigurationSection partyKits = getConfig().getConfigurationSection("kits");
+                return partyKits == null ? Collections.emptyList() : partyKits.getKeys(false).stream().filter(v -> v.startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
+            }
             if (args.length == 2 && Set.of("invite","accept","deny","kick","promote").contains(args[0].toLowerCase(Locale.ROOT)))
                 return Bukkit.getOnlinePlayers().stream().map(Player::getName).filter(v -> v.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
         }
