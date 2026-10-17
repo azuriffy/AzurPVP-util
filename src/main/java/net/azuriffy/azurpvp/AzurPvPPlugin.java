@@ -59,6 +59,12 @@ import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import java.util.zip.GZIPInputStream;
 import java.sql.*;
 import java.util.*;
@@ -111,6 +117,15 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private final Map<UUID, Long> itemCooldowns = new ConcurrentHashMap<>();
     private final Map<UUID, Long> pearlCooldowns = new ConcurrentHashMap<>();
     private final Map<UUID, Long> gappleCooldowns = new ConcurrentHashMap<>();
+    // Single-elimination tournament state. Creation/start/cancel are owner-only; joining is open to eligible players.
+    private final List<UUID> tournamentEntrants = new ArrayList<>();
+    private final Set<UUID> tournamentActivePlayers = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, UUID> tournamentOpponent = new ConcurrentHashMap<>();
+    private String tournamentKit = null;
+    private boolean tournamentOpen = false;
+    private boolean tournamentRunning = false;
+    private final Map<UUID, String> pendingLinkCodes = new ConcurrentHashMap<>();
+    private HttpServer linkApiServer;
 
     @Override public void onEnable() {
         saveDefaultConfig();
@@ -129,7 +144,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         runKitMigrations();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "cmode")) {
+        startLinkApi();
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "duels", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "cmode", "tournament", "link", "announcement")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -172,6 +188,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
 
     @Override public void onDisable() {
+        if (linkApiServer != null) { linkApiServer.stop(0); linkApiServer = null; }
         if (combatTask != null) combatTask.cancel();
         for (BlockState st : new ArrayList<>(arenaBlockBackups.values())) { try { st.update(true, false); } catch (Exception ignored) { } }
         arenaBlockBackups.clear();
@@ -436,6 +453,46 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             default -> tell(s,"&cUnknown role subcommand. Use /role help.");
         }
     }
+    private void startLinkApi() {
+        if (!getConfig().getBoolean("link-api.enabled", false)) return;
+        String secret = getConfig().getString("link-api.secret", "");
+        if (secret == null || secret.length() < 24) { getLogger().warning("Discord link API disabled: configure link-api.secret with at least 24 random characters."); return; }
+        int port = Math.max(1024, Math.min(65535, getConfig().getInt("link-api.port", 8765)));
+        try {
+            linkApiServer = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
+            linkApiServer.createContext("/api/link/claim", this::handleLinkClaimRequest);
+            linkApiServer.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(2, r -> { Thread t = new Thread(r, "AzurPvP-LinkAPI"); t.setDaemon(true); return t; }));
+            linkApiServer.start(); getLogger().info("Discord link API started on port " + port);
+        } catch (IOException ex) { getLogger().severe("Could not start Discord link API: " + ex.getMessage()); }
+    }
+
+    private void handleLinkClaimRequest(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) { sendApiResponse(exchange,405,"{\"ok\":false,\"error\":\"POST required\"}"); return; }
+            String expected=getConfig().getString("link-api.secret",""); String provided=exchange.getRequestHeaders().getFirst("X-AzurPvP-Token");
+            if(provided==null||!java.security.MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),provided.getBytes(StandardCharsets.UTF_8))){sendApiResponse(exchange,401,"{\"ok\":false,\"error\":\"unauthorized\"}");return;}
+            Map<String,String> fields=new HashMap<>(); String body=new String(exchange.getRequestBody().readAllBytes(),StandardCharsets.UTF_8);
+            for(String pair:body.split("&")){String[] kv=pair.split("=",2);if(kv.length==2)fields.put(URLDecoder.decode(kv[0],StandardCharsets.UTF_8),URLDecoder.decode(kv[1],StandardCharsets.UTF_8));}
+            String code=fields.getOrDefault("code","").trim().toUpperCase(Locale.ROOT), discordId=fields.getOrDefault("discord_id","").trim();
+            if(!code.matches("[A-F0-9]{8}")||!discordId.matches("[0-9]{15,22}")){sendApiResponse(exchange,400,"{\"ok\":false,\"error\":\"invalid code or Discord ID\"}");return;}
+            String uuid,name; File dbFile=new File(getDataFolder(),"stats.db");
+            try(Connection apiDb=DriverManager.getConnection("jdbc:sqlite:"+dbFile.getAbsolutePath())){
+                apiDb.setAutoCommit(false);
+                try(PreparedStatement find=apiDb.prepareStatement("SELECT uuid,player_name,created_at,claimed FROM link_codes WHERE code=?")){
+                    find.setString(1,code); try(ResultSet rs=find.executeQuery()){
+                        if(!rs.next()||rs.getInt("claimed")!=0||System.currentTimeMillis()-rs.getLong("created_at")>600000L){apiDb.rollback();sendApiResponse(exchange,400,"{\"ok\":false,\"error\":\"code invalid, expired, or already used\"}");return;}
+                        uuid=rs.getString("uuid");name=rs.getString("player_name");
+                    }
+                }
+                try(PreparedStatement update=apiDb.prepareStatement("UPDATE link_codes SET claimed=1,discord_id=? WHERE code=? AND claimed=0")){update.setString(1,discordId);update.setString(2,code);if(update.executeUpdate()!=1){apiDb.rollback();sendApiResponse(exchange,409,"{\"ok\":false,\"error\":\"code already used\"}");return;}}
+                apiDb.commit();
+            }catch(SQLException ex){getLogger().warning("Link API DB error: "+ex.getMessage());sendApiResponse(exchange,500,"{\"ok\":false,\"error\":\"database error\"}");return;}
+            sendApiResponse(exchange,200,"{\"ok\":true,\"uuid\":\""+uuid+"\",\"minecraft_name\":\""+jsonEscape(name)+"\",\"discord_id\":\""+discordId+"\"}");
+        }catch(Throwable ex){getLogger().warning("Link API request failed: "+ex.getMessage());try{sendApiResponse(exchange,500,"{\"ok\":false,\"error\":\"internal error\"}");}catch(IOException ignored){}}
+    }
+    private String jsonEscape(String v){return v==null?"":v.replace("\\","\\\\").replace("\"","\\\"").replace("\n","\\n").replace("\r","\\r");}
+    private void sendApiResponse(HttpExchange ex,int status,String body)throws IOException{byte[] bytes=body.getBytes(StandardCharsets.UTF_8);ex.getResponseHeaders().set("Content-Type","application/json; charset=utf-8");ex.getResponseHeaders().set("Cache-Control","no-store");ex.sendResponseHeaders(status,bytes.length);try(OutputStream out=ex.getResponseBody()){out.write(bytes);}}
+
     private void openDatabase() throws SQLException {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         File file = new File(getDataFolder(), "stats.db");
@@ -448,6 +505,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             // Per-gamemode ranked progression. This table is intentionally normalized for future website/API use.
             s.executeUpdate("CREATE TABLE IF NOT EXISTS ranked_stats (uuid TEXT NOT NULL, name TEXT NOT NULL, gamemode TEXT NOT NULL, ar INTEGER NOT NULL DEFAULT 0, rank_index INTEGER NOT NULL DEFAULT 0, promotion_wins INTEGER NOT NULL DEFAULT 0, in_promotion INTEGER NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(uuid, gamemode))");
             s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_ranked_stats_mode_rank ON ranked_stats(gamemode, rank_index DESC, ar DESC)");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS link_codes (code TEXT PRIMARY KEY, uuid TEXT NOT NULL, player_name TEXT NOT NULL, created_at INTEGER NOT NULL, claimed INTEGER NOT NULL DEFAULT 0, discord_id TEXT)");
+            s.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS idx_link_codes_uuid_pending ON link_codes(uuid, claimed)");
         }
         // SQLite has no "ADD COLUMN IF NOT EXISTS": a failure just means the column is already there.
         for (String col : List.of("duel_wins INTEGER DEFAULT 0", "duel_losses INTEGER DEFAULT 0", "duel_streak INTEGER DEFAULT 0", "best_duel_streak INTEGER DEFAULT 0", "elo INTEGER DEFAULT 1000", "ar INTEGER DEFAULT 0", "ar_rank_index INTEGER DEFAULT 0", "promotion_wins INTEGER DEFAULT 0", "in_promotion INTEGER DEFAULT 0", "last_online INTEGER DEFAULT 0")) {
@@ -1013,6 +1072,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         String[] pieces = e.getMessage().substring(1).split("\\s+", 2);
         String root = pieces[0].toLowerCase(Locale.ROOT).replaceFirst("^minecraft:", "");
         String args = pieces.length > 1 ? pieces[1] : "";
+        if (root.equals("duels")) { e.setCancelled(true); openKitMenu(p, "queue", null); return; }
         if (root.equals("r")) { e.setCancelled(true); if (args.isBlank()) tell(p, "&cUsage: /r <message>"); else replyToLast(p, args); return; }
         if (root.equals("gmsp")) { e.setCancelled(true); if (!isModOrAbove(p)) { tell(p, "&cMod or above required."); return; } p.setGameMode(GameMode.SPECTATOR); tell(p, "&dSpectator mode enabled silently."); return; }
         if (root.equals("gmc") || root.equals("gms") || root.equals("gamemode")) {
@@ -1093,6 +1153,36 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
             return true;
         }
+        if (n.equals("announcement") || n.equals("announce")) {
+            if (!isDev(s)) { tell(s, "&cOnly the Owner can use /announcement."); return true; }
+            if (a.length == 0) { tell(s, "&cUsage: /announcement <message>"); return true; }
+            String message = String.join(" ", a);
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                online.sendTitle(c("&5&lAZURPVP"), c("&f" + message.replace('&', '§')), 10, 70, 15);
+                online.playSound(online.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.1f);
+            }
+            tell(s, "&aAnnouncement displayed on everyone's screen.");
+            return true;
+        }
+        if (n.equals("link")) {
+            if (!(s instanceof Player player)) { tell(s, "&cPlayers only."); return true; }
+            if (a.length > 0 && a[0].equalsIgnoreCase("status")) {
+                try (PreparedStatement ps = db.prepareStatement("SELECT discord_id FROM link_codes WHERE uuid=? AND claimed=1 ORDER BY created_at DESC LIMIT 1")) {
+                    ps.setString(1, player.getUniqueId().toString());
+                    try (ResultSet rs = ps.executeQuery()) { if (rs.next()) tell(player, "&aYour Minecraft account is linked to Discord ID &f" + rs.getString(1) + "&a."); else tell(player, "&eYour account is not linked yet. Use &f/link&e to generate a code."); }
+                } catch (SQLException ex) { tell(player, "&cCould not check link status."); }
+                return true;
+            }
+            String code = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase(Locale.ROOT);
+            try (PreparedStatement cleanup = db.prepareStatement("DELETE FROM link_codes WHERE uuid=? AND claimed=0")) { cleanup.setString(1, player.getUniqueId().toString()); cleanup.executeUpdate(); } catch (SQLException ignored) { }
+            try (PreparedStatement ps = db.prepareStatement("INSERT INTO link_codes(code,uuid,player_name,created_at,claimed,discord_id) VALUES(?,?,?,?,0,NULL)")) {
+                ps.setString(1, code); ps.setString(2, player.getUniqueId().toString()); ps.setString(3, player.getName()); ps.setLong(4, System.currentTimeMillis()); ps.executeUpdate();
+                tell(player, "&dYour Discord link code is: &f&l" + code);
+                tell(player, "&7In Discord, use &f/link " + code + "&7. It expires after 10 minutes.");
+            } catch (SQLException ex) { tell(player, "&cCould not generate a link code. Try again."); getLogger().warning("Link code generation failed: " + ex.getMessage()); }
+            return true;
+        }
+        if (n.equals("tournament")) { handleTournamentCommand(s, a); return true; }
         String category = commandCategory(n);
         if (!can(s, category)) { tell(s, "&cYou don't have permission to use that command."); return true; }
         if(n.equals("role")) { roleCommand(s,a); return true; }
@@ -1162,8 +1252,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if(!(s instanceof Player p)){tell(s,"&cPlayers only.");return true;}
             if(a.length>=1){
                 String want=a[0].toLowerCase(Locale.ROOT);
-                for(Board b:boards()) if(b.id().equals(want)){if(b.id().equals("ranked")) openRankedModeLeaderboards(p); else openBoard(p,b);return true;}
-                tell(p,"&cUnknown leaderboard. Options: &f"+String.join(", ",boards().stream().map(Board::id).toList()));return true;
+                for (String mode : configuredRankedModes()) if (normalizeKitName(mode).equals(normalizeKitName(want))) { openRankedModeBoard(p, mode); return true; }
+                for(Board b:boards()) if(b.id().equals(want)){openBoard(p,b);return true;}
+                tell(p,"&cUnknown leaderboard. Options: &f"+String.join(", ",boards().stream().map(Board::id).toList())+", "+String.join(", ",configuredRankedModes()));return true;
             }
             openLeaderboards(p); return true;
         }
@@ -2031,6 +2122,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     duelRoundWins.getOrDefault(winner.getUniqueId(), 0), duelRoundWins.getOrDefault(loser.getUniqueId(), 0), duelArenaByPlayer.get(winner.getUniqueId()));
             } catch (Throwable t) { getLogger().severe("[DuelStats] recordDuelResult crashed: " + t); t.printStackTrace(); }
         } else getLogger().warning("[DuelStats] finishDuel skipped recording (duel already finished): " + winner.getName() + " vs " + loser.getName());
+        handleTournamentResult(winner, loser);
         String finishedArenaId = duelArenaByPlayer.get(winner.getUniqueId());
         if (finishedArenaId == null) finishedArenaId = duelArenaByPlayer.get(loser.getUniqueId());
         releaseDuelArena(finishedArenaId);
@@ -2136,6 +2228,119 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             }
         }
     }
+
+    private void handleTournamentCommand(CommandSender sender, String[] args) {
+        if (args.length == 0 || args[0].equalsIgnoreCase("help")) {
+            tell(sender, "&dTournament commands: &f/tournament join, leave, info");
+            if (isDev(sender)) tell(sender, "&dOwner: &f/tournament create <mode>, start, cancel");
+            return;
+        }
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        if (sub.equals("create")) {
+            if (!isDev(sender)) { tell(sender, "&cOnly the Owner can create tournaments."); return; }
+            if (tournamentOpen || tournamentRunning) { tell(sender, "&cA tournament already exists. Use /tournament cancel first."); return; }
+            if (args.length < 2) { tell(sender, "&cUsage: /tournament create <gamemode>"); return; }
+            String requested = normalizeKitName(args[1]);
+            String mode = configuredRankedModes().stream().filter(k -> normalizeKitName(k).equals(requested)).findFirst().orElse(null);
+            if (mode == null) mode = getConfig().contains("kits." + requested) ? requested : null;
+            if (mode == null) { tell(sender, "&cUnknown mode. Available: &f" + String.join(", ", configuredRankedModes())); return; }
+            tournamentKit = mode; tournamentEntrants.clear(); tournamentActivePlayers.clear(); tournamentOpponent.clear();
+            tournamentOpen = true; tournamentRunning = false;
+            Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &dA " + prettyKitName(mode) + " tournament is open! Use &f/tournament join &dto enter."));
+            tell(sender, "&aTournament created for &f" + prettyKitName(mode) + "&a. Players can join; run &f/tournament start&a when ready.");
+            return;
+        }
+        if (sub.equals("join")) {
+            if (!(sender instanceof Player player)) { tell(sender, "&cPlayers only."); return; }
+            if (!tournamentOpen || tournamentRunning) { tell(player, "&cThere is no tournament accepting entries right now."); return; }
+            try (PreparedStatement linked = db.prepareStatement("SELECT 1 FROM link_codes WHERE uuid=? AND claimed=1 LIMIT 1")) {
+                linked.setString(1, player.getUniqueId().toString());
+                try (ResultSet rs = linked.executeQuery()) { if (!rs.next()) { tell(player, "&cLink your Minecraft account to Discord first with &f/link&c to become eligible for tournaments."); return; } }
+            } catch (SQLException ex) { tell(player, "&cCould not verify your Discord link. Try again later."); return; }
+            if (activeDuels.containsKey(player.getUniqueId()) || duelQueue.containsKey(player.getUniqueId()) || rankedQueued.contains(player.getUniqueId()) || spectating.containsKey(player.getUniqueId())) { tell(player, "&cLeave your current duel, queue, or spectator mode first."); return; }
+            if (tournamentEntrants.contains(player.getUniqueId())) { tell(player, "&eYou're already entered."); return; }
+            tournamentEntrants.add(player.getUniqueId());
+            Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &d" + player.getName() + " joined &f" + prettyKitName(tournamentKit) + "&d. &7(" + tournamentEntrants.size() + " entrants)"));
+            return;
+        }
+        if (sub.equals("leave")) {
+            if (!(sender instanceof Player player)) { tell(sender, "&cPlayers only."); return; }
+            if (tournamentRunning) { tell(player, "&cYou can't leave after the tournament starts."); return; }
+            if (tournamentEntrants.remove(player.getUniqueId())) tell(player, "&eYou left the tournament."); else tell(player, "&cYou aren't entered in the tournament.");
+            return;
+        }
+        if (sub.equals("info")) {
+            if (tournamentKit == null) { tell(sender, "&eNo tournament is currently scheduled."); return; }
+            tell(sender, "&dTournament mode: &f" + prettyKitName(tournamentKit) + " &8| &dEntrants: &f" + tournamentEntrants.size() + " &8| &dStatus: &f" + (tournamentRunning ? "Running" : "Open"));
+            return;
+        }
+        if (sub.equals("start")) {
+            if (!isDev(sender)) { tell(sender, "&cOnly the Owner can start tournaments."); return; }
+            if (!tournamentOpen || tournamentKit == null) { tell(sender, "&cCreate a tournament first."); return; }
+            tournamentEntrants.removeIf(id -> Bukkit.getPlayer(id) == null || !Bukkit.getPlayer(id).isOnline());
+            if (tournamentEntrants.size() < 2) { tell(sender, "&cAt least two online players must join."); return; }
+            tournamentOpen = false; tournamentRunning = true;
+            List<UUID> entrants = new ArrayList<>(tournamentEntrants); Collections.shuffle(entrants);
+            tournamentEntrants.clear(); tournamentEntrants.addAll(entrants); tournamentActivePlayers.clear(); tournamentActivePlayers.addAll(entrants);
+            Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &dThe " + prettyKitName(tournamentKit) + " tournament is starting with &f" + entrants.size() + " &dplayers!"));
+            startNextTournamentRound(); return;
+        }
+        if (sub.equals("cancel")) {
+            if (!isDev(sender)) { tell(sender, "&cOnly the Owner can cancel tournaments."); return; }
+            if (tournamentKit == null) { tell(sender, "&cThere is no tournament to cancel."); return; }
+            tournamentRunning = false;
+            for (UUID id : new HashSet<>(tournamentActivePlayers)) { Player pl = Bukkit.getPlayer(id); if (pl != null && activeDuels.containsKey(id)) { UUID op = activeDuels.get(id); Player opponent = Bukkit.getPlayer(op); if (opponent != null) finishDuel(opponent, pl); } }
+            tournamentEntrants.clear(); tournamentActivePlayers.clear(); tournamentOpponent.clear(); tournamentKit = null; tournamentOpen = false; tournamentRunning = false;
+            Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &cThe tournament was cancelled by the Owner.")); return;
+        }
+        tell(sender, "&cUnknown subcommand. Use /tournament help.");
+    }
+
+    private void startNextTournamentRound() {
+        if (!tournamentRunning || tournamentKit == null) return;
+        List<UUID> waiting = new ArrayList<>();
+        for (UUID id : tournamentEntrants) if (tournamentActivePlayers.contains(id) && !tournamentOpponent.containsKey(id)) waiting.add(id);
+        // If an odd number remain, give the last player a bye into the next round.
+        if (waiting.size() % 2 == 1) {
+            UUID bye = waiting.remove(waiting.size() - 1);
+            Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &d" + safeName(bye) + " receives a bye this round."));
+        }
+        if (waiting.isEmpty()) {
+            if (tournamentActivePlayers.size() == 1) {
+                UUID champion = tournamentActivePlayers.iterator().next();
+                Bukkit.broadcastMessage(c("&6&lTOURNAMENT CHAMPION &8» &f" + safeName(champion) + " &6wins the " + prettyKitName(tournamentKit) + " tournament!"));
+                Player champ = Bukkit.getPlayer(champion); if (champ != null) champ.sendTitle(c("&6&lCHAMPION!"), c("&dYou won the tournament!"), 10, 100, 20);
+                tournamentActivePlayers.clear(); tournamentOpponent.clear(); tournamentEntrants.clear(); tournamentKit = null; tournamentOpen = false; tournamentRunning = false;
+            } else if (tournamentActivePlayers.size() > 1) {
+                // All current matches are still running; their completion will schedule the next round.
+            }
+            return;
+        }
+        for (int i = 0; i + 1 < waiting.size(); i += 2) {
+            UUID one = waiting.get(i), two = waiting.get(i + 1);
+            Player p1 = Bukkit.getPlayer(one), p2 = Bukkit.getPlayer(two);
+            if (p1 == null || p2 == null) { UUID survivor = p1 == null ? two : one; tournamentActivePlayers.remove(p1 == null ? one : two); continue; }
+            tournamentOpponent.put(one, two); tournamentOpponent.put(two, one);
+            duelChosenKits.put(one, tournamentKit); duelChosenKits.put(two, tournamentKit); duelRounds.put(one, 1); duelRounds.put(two, 1);
+            Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &dNext match: &f" + p1.getName() + " &7vs &f" + p2.getName()));
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (tournamentRunning && p1.isOnline() && p2.isOnline()) startDuel(p1, p2, false);
+                else { tournamentActivePlayers.remove(p1.isOnline() ? two : one); tournamentOpponent.remove(one); tournamentOpponent.remove(two); Bukkit.getScheduler().runTask(this, this::startNextTournamentRound); }
+            }, 40L);
+        }
+    }
+
+    private void handleTournamentResult(Player winner, Player loser) {
+        UUID wid = winner.getUniqueId(), lid = loser.getUniqueId();
+        if (!tournamentRunning || !Objects.equals(tournamentOpponent.get(wid), lid)) return;
+        tournamentOpponent.remove(wid); tournamentOpponent.remove(lid);
+        tournamentActivePlayers.remove(lid);
+        tournamentEntrants.remove(lid);
+        Bukkit.broadcastMessage(c("&5&lTOURNAMENT &8» &f" + winner.getName() + " &ddefeated &f" + loser.getName() + " &dand advances!"));
+        if (tournamentOpponent.isEmpty()) Bukkit.getScheduler().runTaskLater(this, this::startNextTournamentRound, 120L);
+    }
+
+    private String safeName(UUID id) { Player p = Bukkit.getPlayer(id); if (p != null) return p.getName(); return Bukkit.getOfflinePlayer(id).getName() == null ? id.toString().substring(0, 8) : Bukkit.getOfflinePlayer(id).getName(); }
 
     private void openKitMenu(Player p, String mode, String target) {
         Inventory inv=Bukkit.createInventory(null,54,c(mode.equals("editor") ? "&5&lAzurPvP &8» &dKit Editor" : "&5&lAzurPvP &8» &dSelect a Kit"));
@@ -3238,7 +3443,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     private List<Board> boards() {
         int minDuels = Math.max(1, getConfig().getInt("leaderboard.min-duels-for-win-rate", 5));
         return List.of(
-            new Board("ranked", "Ranked Leaderboards", Material.GOLDEN_SWORD, "AR", "SELECT uuid,name,ar AS v FROM stats WHERE duel_wins+duel_losses>0 ORDER BY ar_rank_index DESC, ar DESC, duel_wins DESC LIMIT 10"),
             new Board("wins", "Top Wins", Material.DIAMOND_SWORD, "Wins", "SELECT uuid,name,duel_wins AS v FROM stats WHERE duel_wins>0 ORDER BY duel_wins DESC LIMIT 10"),
             new Board("winrate", "Top Win Rate", Material.GOLDEN_APPLE, "Win rate", "SELECT uuid,name,ROUND(duel_wins*100.0/(duel_wins+duel_losses),1) AS v FROM stats WHERE duel_wins+duel_losses>=" + minDuels + " ORDER BY v DESC, duel_wins DESC LIMIT 10"),
             new Board("winstreaks", "Top Win Streaks", Material.BLAZE_POWDER, "Best win streak", "SELECT uuid,name,best_duel_streak AS v FROM stats WHERE best_duel_streak>0 ORDER BY best_duel_streak DESC LIMIT 10"),
@@ -3247,11 +3451,26 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         );
     }
     private void openLeaderboards(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 27, c("&5&lAzurPvP &8» &dLeaderboards"));
+        Inventory inv = Bukkit.createInventory(null, 54, c("&5&lAzurPvP &8» &dLeaderboards"));
+        List<String> modes = configuredRankedModes();
+        int[] modeSlots = {10,11,12,13,14,15,16,19,20,21,22,23,24,25,28,29,30,31,32,33,34};
+        for (int i = 0; i < modes.size() && i < modeSlots.length; i++) {
+            String mode = modes.get(i);
+            inv.setItem(modeSlots[i], namedItem(kitIconMaterial(mode), "&d&lRanked: " + prettyKitName(mode),
+                List.of("&7View this mode's ranked leaderboard", "&dYour tier: &f" + arRank(p.getUniqueId(), mode),
+                        "&dYour AR: &f" + rankedValue(p.getUniqueId(), mode, "ar"), "&eClick to view top players")));
+        }
         List<Board> list = boards();
-        for (int i = 0; i < list.size(); i++) inv.setItem(10 + i, namedItem(list.get(i).icon(), "&d&l" + list.get(i).title(), List.of("&7Click to view the top 10")));
-        inv.setItem(22, namedItem(Material.BARRIER, "&cClose", List.of("&7Close leaderboards")));
+        int[] otherSlots = {37,38,39,41,42};
+        for (int i = 0; i < list.size() && i < otherSlots.length; i++) {
+            Board board = list.get(i);
+            inv.setItem(otherSlots[i], namedItem(board.icon(), "&d&l" + board.title(), List.of("&7Click to view the top 10")));
+        }
+        inv.setItem(49, namedItem(Material.BARRIER, "&cClose", List.of("&7Close leaderboards")));
         p.openInventory(inv);
+    }
+    private Material kitIconMaterial(String mode) {
+        try { return kitIconItem(mode).getType(); } catch (Exception ignored) { return Material.GOLDEN_SWORD; }
     }
     private void openRankedModeLeaderboards(Player p) {
         Inventory inv = Bukkit.createInventory(null, 45, c("&5&lAzurPvP &8» &dRanked Gamemodes"));
@@ -3428,9 +3647,18 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if (title.equals("AzurPvP » Leaderboards")) {
             e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
-            if (e.getSlot()==22) { p.closeInventory(); return; }
+            if (e.getSlot()==49) { p.closeInventory(); return; }
+            ItemStack clicked = e.getCurrentItem();
+            if (clicked != null && clicked.hasItemMeta() && clicked.getItemMeta().hasDisplayName()) {
+                String display = ChatColor.stripColor(clicked.getItemMeta().getDisplayName());
+                if (display != null && display.startsWith("Ranked: ")) {
+                    String modeName = display.substring("Ranked: ".length());
+                    for (String mode : configuredRankedModes()) if (prettyKitName(mode).equalsIgnoreCase(modeName)) { openRankedModeBoard(p, mode); return; }
+                }
+            }
             List<Board> list = boards();
-            if (e.getSlot()>=10 && e.getSlot()-10<list.size()) { Board selected = list.get(e.getSlot()-10); if (selected.id().equals("ranked")) openRankedModeLeaderboards(p); else openBoard(p, selected); }
+            for (Board board : list) if (clicked != null && clicked.hasItemMeta() && clicked.getItemMeta().hasDisplayName()
+                    && ChatColor.stripColor(clicked.getItemMeta().getDisplayName()).equalsIgnoreCase(board.title())) { openBoard(p, board); return; }
             return;
         }
         if (title.equals("AzurPvP » Ranked Gamemodes")) {
@@ -3445,7 +3673,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         for (String mode : configuredRankedModes()) if (title.equals("AzurPvP » Ranked " + prettyKitName(mode))) {
             e.setCancelled(true); if (e.getClickedInventory()!=e.getView().getTopInventory()) return;
-            if (e.getSlot()==40) openRankedModeLeaderboards(p);
+            if (e.getSlot()==40) openLeaderboards(p);
             return;
         }
         for (Board lbBoard : boards()) if (title.equals("AzurPvP » " + lbBoard.title())) {
