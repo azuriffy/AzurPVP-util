@@ -521,11 +521,11 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (winnerPromo) {
                 int wins = getStat(wid, "promotion_wins") + 1;
                 if (wins >= 3) {
-                    try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar_rank_index=?, ar=0, promotion_wins=0, in_promotion=0 WHERE uuid=?")) { ps.setInt(1, wr+1); ps.setString(2, wid.toString()); ps.executeUpdate(); }
+                    try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar_rank_index=?, ar=0, promotion_wins=0, in_promotion=0 WHERE uuid=?")) { ps.setInt(1, wr+1); ps.setString(2, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save ranked promotion: " + e.getMessage()); return; }
                     tell(winner, "&6&lPROMOTION! &dYou advanced to &f" + AR_RANKS.get(wr+1) + "&d.");
                     winner.playSound(winner.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1.3f);
                 } else {
-                    try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=MAX(100, ar+?), promotion_wins=? WHERE uuid=?")) { ps.setInt(1, winnerGain); ps.setInt(2, wins); ps.setString(3, wid.toString()); ps.executeUpdate(); }
+                    try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=MAX(100, ar+?), promotion_wins=? WHERE uuid=?")) { ps.setInt(1, winnerGain); ps.setInt(2, wins); ps.setString(3, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save promotion progress: " + e.getMessage()); return; }
                     tell(winner, "&aRanked win! &dPromotion wins: &f"+wins+"/3 &8| &dAR: &f"+getStat(wid,"ar"));
                 }
             } else {
