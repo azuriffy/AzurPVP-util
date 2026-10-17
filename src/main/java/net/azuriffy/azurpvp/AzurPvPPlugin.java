@@ -117,7 +117,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         runKitMigrations();
         loadRoles();
         try { openDatabase(); } catch (SQLException e) { getLogger().severe("SQLite startup failed: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
-        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "arena", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "addarena", "cpvparena", "set", "delarena", "cmode")) {
+        for (String name : List.of("azurpvp", "spawn", "setspawn", "stats", "kit", "duel", "accept", "msg", "reply", "ignore", "rules", "discord", "ping", "tps", "fly", "heal", "feed", "vanish", "freeze", "report", "staffchat", "role", "back", "top", "tpa", "home", "sethome", "warp", "setwarp", "unwarp", "party", "clan", "friends", "achievements", "quests", "settings", "spectate", "leave", "leaderboard", "bounty", "killstreak", "playtime", "whois", "maintenance", "staffmode", "invsee", "ec", "announce", "mute", "unmute", "ban", "tempban", "unban", "kick", "warn", "history", "alerts", "cps", "clear", "repair", "gamemode", "speed", "backup", "world", "tp", "cmode")) {
             PluginCommand c = getCommand(name);
             if (c != null) { c.setExecutor(this); c.setTabCompleter(this); }
         }
@@ -336,7 +336,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     @EventHandler public void hideRestrictedCommands(PlayerCommandSendEvent e) {
         Player p = e.getPlayer();
-        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role","arena","addarena","delarena","set");
+        Set<String> restricted = Set.of("world","setspawn","maintenance","staffmode","invsee","ec","announce","mute","unmute","ban","tempban","timeout","unban","kick","warn","history","alerts","clear","repair","gamemode","speed","backup","whois","heal","feed","vanish","freeze","staffchat","role");
         if (isDev(p)) return;
         e.getCommands().removeIf(command -> {
             String root = command.toLowerCase(Locale.ROOT).split(":")[0];
@@ -348,7 +348,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
     }
     private String commandCategory(String command) {
         return switch(command.toLowerCase(Locale.ROOT).split(":")[0]) {
-            case "setspawn","maintenance","backup","role","arena","addarena","delarena","set","world","tp","cmode" -> "owner";
+            case "setspawn","maintenance","backup","role","world","tp","cmode" -> "owner";
             case "ban","tempban","timeout","unban","kick","mute","unmute","warn","history","alerts","clear","repair","gamemode","speed","heal","feed" -> "moderation";
             case "staffmode","invsee","ec","announce","whois","vanish","freeze","staffchat" -> "staff";
             default -> "member";
@@ -666,7 +666,9 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         return switch (arenaType) {
             case "vanilla" -> type == Material.GRASS_BLOCK || type == Material.DIRT
                     || type == Material.STONE || type == Material.DEEPSLATE
-                    || type == Material.COBBLED_DEEPSLATE;
+                    || type == Material.COBBLED_DEEPSLATE || type == Material.OBSIDIAN
+                    || type == Material.CRYING_OBSIDIAN || type == Material.RESPAWN_ANCHOR
+                    || type == Material.GLOWSTONE;
             case "uhc" -> type == Material.OAK_PLANKS || type == Material.COBBLESTONE
                     || type == Material.CRAFTING_TABLE || type == Material.COBBLESTONE_STAIRS
                     || type == Material.COBBLESTONE_SLAB || type == Material.COBBLESTONE_WALL
@@ -751,6 +753,40 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         return false;
     }
     // End crystals, TNT, creepers, etc.
+
+    private boolean isSchematicUhcWorld(World world) {
+        return "uhc".equals(schematicArenaType(world));
+    }
+
+    private boolean isGravityBlock(Material type) {
+        return type == Material.SAND || type == Material.RED_SAND || type == Material.GRAVEL
+                || type == Material.ANVIL || type == Material.CHIPPED_ANVIL || type == Material.DAMAGED_ANVIL
+                || type == Material.WHITE_CONCRETE_POWDER || type == Material.ORANGE_CONCRETE_POWDER
+                || type == Material.MAGENTA_CONCRETE_POWDER || type == Material.LIGHT_BLUE_CONCRETE_POWDER
+                || type == Material.YELLOW_CONCRETE_POWDER || type == Material.LIME_CONCRETE_POWDER
+                || type == Material.PINK_CONCRETE_POWDER || type == Material.GRAY_CONCRETE_POWDER
+                || type == Material.LIGHT_GRAY_CONCRETE_POWDER || type == Material.CYAN_CONCRETE_POWDER
+                || type == Material.PURPLE_CONCRETE_POWDER || type == Material.BLUE_CONCRETE_POWDER
+                || type == Material.BROWN_CONCRETE_POWDER || type == Material.GREEN_CONCRETE_POWDER
+                || type == Material.RED_CONCRETE_POWDER || type == Material.BLACK_CONCRETE_POWDER
+                || type == Material.DRAGON_EGG;
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void preventUhcGravityBlocksFalling(org.bukkit.event.block.BlockPhysicsEvent e) {
+        if (isSchematicUhcWorld(e.getBlock().getWorld()) && isGravityBlock(e.getBlock().getType())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void preventUhcFallingEntities(org.bukkit.event.entity.EntityChangeBlockEvent e) {
+        if (e.getEntity() instanceof org.bukkit.entity.FallingBlock && isSchematicUhcWorld(e.getBlock().getWorld())) {
+            e.setCancelled(true);
+            e.getEntity().remove();
+        }
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void protectArenaFromEntityExplosions(org.bukkit.event.entity.EntityExplodeEvent e) {
         e.blockList().removeIf(this::arenaProtectsFromExplosion);
@@ -968,7 +1004,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             tell(s, "&7Players: &f/spawn, /stats, /duel, /accept, /msg, /reply, /ignore, /rules, /discord, /ping, /tps, /top, /back, /tpa, /home, /sethome, /warp, /playtime, /report, /spectate, /leave, /leaderboard");
             if (can(s,"staff")) tell(s, "&aStaff: &f/fly, /vanish, /freeze, /staffchat, /whois, /announce");
             if (can(s,"moderation")) tell(s, "&cModeration: &f/ban, /tempban, /unban, /kick, /mute, /unmute, /warn, /history, /heal, /feed, /gamemode, /speed, /clear, /repair");
-            if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup, /arena, /addarena, /delarena");
+            if (isDev(s)) tell(s, "&dOwner: &f/role, /setspawn, /maintenance, /backup");
             return true;
         }
         if(n.equals("spectate")) {
@@ -1071,53 +1107,6 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             if (destination == null) { tell(p, "&cThat world is not loaded."); return true; }
             p.teleport(new Location(destination, 0.5, Math.max(64, destination.getMinHeight() + 1), 0.5));
             tell(p, "&dTeleported to &f" + destination.getName() + " &dat coordinates &f0,0&d.");
-            return true;
-        }
-        if(n.equals("delarena")) {
-            if(!isDev(s)){tell(s,"&cOnly the owner can delete arenas.");return true;}
-            if(a.length!=1||!a[0].matches("\\d{1,9}")){tell(s,"&cUsage: /delarena <number>");return true;}
-            String delId=String.valueOf(Integer.parseInt(a[0]));
-            if(!getConfig().contains("arenas."+delId)){tell(s,"&cArena "+delId+" does not exist.");return true;}
-            if(occupiedDuelArenas.contains(delId)){tell(s,"&cArena "+delId+" is in use right now. Try again after the match.");return true;}
-            discardArenaBackups(delId);
-            getConfig().set("arenas."+delId,null);saveConfig();
-            tell(s,"&aDeleted arena "+delId+" and its spawns.");return true;
-        }
-        if(n.equals("addarena")) {
-            if(!isDev(s)){tell(s,"&cOnly the owner can create arenas.");return true;}
-            if(!(s instanceof Player p)||a.length!=2){tell(s,"&cUsage: /addarena <number> <true/false>");return true;}
-            int id; boolean mine; try{id=Integer.parseInt(a[0]); if(id<1)throw new NumberFormatException();}catch(NumberFormatException ex){tell(s,"&cArena number must be a positive integer.");return true;}
-            if(!a[1].equalsIgnoreCase("true")&&!a[1].equalsIgnoreCase("false")){tell(s,"&cUse true or false for block breaking.");return true;}
-            String path="arenas."+id; if(getConfig().contains(path)){tell(p,"&cArena "+id+" already exists. Each number can only be used once.");return true;}
-            Location l=p.getLocation(); getConfig().set(path+".world",l.getWorld().getName());getConfig().set(path+".x",l.getX());getConfig().set(path+".y",l.getY());getConfig().set(path+".z",l.getZ());getConfig().set(path+".break-below-zero",Boolean.parseBoolean(a[1]));getConfig().set(path+".spawn1",null);getConfig().set(path+".spawn2",null);saveConfig();
-            tell(p,"&aCreated arena "+id+" with a 100-block radius. Breaking is "+(Boolean.parseBoolean(a[1])?"allowed below Y=0":"disabled")+".");return true;
-        }
-        if(n.equals("set")) {
-            if(!isDev(s)){tell(s,"&cOnly the owner can configure arena spawns.");return true;}
-            if(!(s instanceof Player p)||a.length!=4||!a[0].equalsIgnoreCase("arena")||!a[1].equalsIgnoreCase("spawn")){tell(s,"&cUsage: /set arena spawn <arena number> <spawn 1-8>");return true;}
-            int id,which;try{id=Integer.parseInt(a[2]);which=Integer.parseInt(a[3]);}catch(NumberFormatException ex){tell(s,"&cArena and spawn numbers must be integers.");return true;}
-            if(which<1||which>8||!getConfig().contains("arenas."+id)){tell(p,"&cArena does not exist or spawn must be 1-8 (spawns 3-8 are optional extra FFA spawns).");return true;}
-            Location l=p.getLocation();String path="arenas."+id+".spawn"+which;getConfig().set(path+".world",l.getWorld().getName());getConfig().set(path+".x",l.getX());getConfig().set(path+".y",l.getY());getConfig().set(path+".z",l.getZ());getConfig().set(path+".yaw",l.getYaw());getConfig().set(path+".pitch",l.getPitch());saveConfig();tell(p,"&aSaved arena "+id+" spawn "+which+".");return true;
-        }
-        if(n.equals("cpvparena")) {
-            if (!(s instanceof Player p)) { tell(s, "&cPlayers only."); return true; }
-            if (!isDev(p)) { tell(p, "&cOnly the owner can manage CPvP arenas."); return true; }
-            if (a.length < 2 || !a[0].equalsIgnoreCase("add")) {
-                tell(p, "&cUsage: /cpvparena add <y-level>");
-                return true;
-            }
-            int yLevel;
-            try { yLevel = Integer.parseInt(a[1]); }
-            catch (NumberFormatException ex) { tell(p, "&cY-level must be a number."); return true; }
-            String id = "cpvparena-" + p.getWorld().getName() + "-" + p.getLocation().getBlockX() + "-" + p.getLocation().getBlockZ();
-            String path = "cpvparenas." + id;
-            getConfig().set(path + ".world", p.getWorld().getName());
-            getConfig().set(path + ".x", p.getLocation().getX());
-            getConfig().set(path + ".z", p.getLocation().getZ());
-            getConfig().set(path + ".y-level", yLevel);
-            getConfig().set(path + ".radius", 200);
-            saveConfig();
-            tell(p, "&aCPvP mining region added: 200-block radius; permitted mining below Y " + yLevel + ".");
             return true;
         }
         if(n.equals("setspawn")) {
@@ -1629,7 +1618,17 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
                     for (int i = 0; i < 2; i++) {
                         LitematicArenaLoader.SpawnPoint point = loaded.spawnPoints().get(i);
                         spawns[i] = new Location(world, point.x() + 0.5, 1.0, point.z() + 0.5,
-                                i == 0 ? -90.0f : 90.0f, 0.0f);
+                                0.0f, 0.0f);
+                    }
+                    // Face each player directly toward the other gold-block marker, regardless of arena orientation.
+                    for (int i = 0; i < 2; i++) {
+                        Location from = spawns[i];
+                        Location to = spawns[1 - i];
+                        double dx = to.getX() - from.getX();
+                        double dz = to.getZ() - from.getZ();
+                        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                        from.setYaw(yaw);
+                        from.setPitch(0.0f);
                     }
                     schematicArenaSpawns.put(worldName, spawns);
                     world.setSpawnLocation(0, 1, 0);
@@ -2507,8 +2506,17 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         giveDuelItem(p);
         givePartyItem(p);
     }
+    private void partySound(Player player, org.bukkit.Sound sound, float pitch) {
+        if (player != null && player.isOnline()) player.playSound(player.getLocation(), sound, 0.7f, pitch);
+    }
     private void partyBroadcast(Party party, String msg) {
-        for (UUID id : party.members) { Player m = Bukkit.getPlayer(id); if (m != null) tell(m, msg); }
+        for (UUID id : party.members) {
+            Player m = Bukkit.getPlayer(id);
+            if (m != null) {
+                tell(m, msg);
+                partySound(m, org.bukkit.Sound.UI_BUTTON_CLICK, 1.2f);
+            }
+        }
     }
     private boolean partyBlocked(Player p) {
         UUID id = p.getUniqueId();
@@ -2527,6 +2535,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         if (partyBlocked(p)) return;
         partyByPlayer.put(p.getUniqueId(), new Party(p.getUniqueId()));
         enteredParty(p);
+        partySound(p, org.bukkit.Sound.BLOCK_NOTE_BLOCK_CHIME, 1.3f);
         tell(p, "&aParty created! Invite players with &f/party invite <player> &aor the cake. Queueing is disabled while you are in a party.");
     }
     private void invitePlayer(Player leader, Player target) {
@@ -2540,6 +2549,8 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         long expires = System.currentTimeMillis() + getConfig().getLong("party.invite-seconds", 60L) * 1000L;
         partyInvites.computeIfAbsent(target.getUniqueId(), k -> new ConcurrentHashMap<>()).put(leader.getUniqueId(), expires);
         tell(leader, "&dInvited &f" + target.getName() + " &dto your party.");
+        partySound(leader, org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 1.2f);
+        partySound(target, org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 1.5f);
         net.kyori.adventure.text.Component line = net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection()
             .deserialize(prefix() + c("&d" + leader.getName() + " &7invited you to their party. "))
             .append(net.kyori.adventure.text.Component.text("[ACCEPT]", net.kyori.adventure.text.format.NamedTextColor.GREEN, net.kyori.adventure.text.format.TextDecoration.BOLD)
@@ -2569,6 +2580,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         partyByPlayer.put(p.getUniqueId(), party);
         enteredParty(p);
         tell(p, "&aYou joined &f" + nameOf(party.leader) + "&a's party. Queueing is disabled while you are in a party.");
+        partySound(p, org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 0.9f);
         partyBroadcast(party, "&d" + p.getName() + " &7joined the party.");
     }
     // how: "leave", "kick" or "quit". A leader who leaves hands leadership to the next member.
@@ -2587,6 +2599,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         }
         if (gone != null && !how.equals("quit")) {
             tell(gone, how.equals("kick") ? "&cYou were kicked from the party." : "&7You left the party.");
+            partySound(gone, how.equals("kick") ? org.bukkit.Sound.ENTITY_VILLAGER_NO : org.bukkit.Sound.UI_BUTTON_CLICK, 0.9f);
             refreshPartyItems(gone);
         }
     }
@@ -2609,6 +2622,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             Player m = Bukkit.getPlayer(id);
             if (m == null) continue;
             tell(m, "&cThe party was disbanded.");
+            partySound(m, org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f);
             refreshPartyItems(m);
         }
     }
@@ -3232,7 +3246,21 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         } else {
             if(e.getSlot()==10) { openRoundsInputMenu(p); }
             else if(e.getSlot()==13) { List<String> maps=getConfig().getStringList("duel.maps"); if(maps.isEmpty())maps=List.of("random"); String current=duelMaps.getOrDefault(p.getUniqueId(),"random"); int i=maps.indexOf(current); duelMaps.put(p.getUniqueId(),maps.get((i+1)%maps.size())); openDuelSettings(p); }
-            else if(e.getSlot()==16) { String targetName=duelTargets.get(p.getUniqueId()); Player target=targetName==null?null:Bukkit.getPlayerExact(targetName); if(target==null){p.closeInventory();tell(p,"&cYour opponent is no longer online.");return;} if(!isStaff(p) && settingString(target,"duel_requests").equals("Off")){p.closeInventory();tell(p,"&c"+target.getName()+" is not accepting duel requests.");return;} duelRequests.put(target.getUniqueId(),p.getUniqueId()); p.closeInventory(); tell(p,"&dDuel request sent to &f"+target.getName()+"&d. Kit: &f"+duelChosenKits.getOrDefault(p.getUniqueId(),"default")+"&d, rounds: &f"+duelRounds.getOrDefault(p.getUniqueId(),3)+"&d, map: &f"+duelMaps.getOrDefault(p.getUniqueId(),"random")); tell(target,"&d"+p.getName()+" challenged you! Use &f/accept "+p.getName()+"&d."); }
+            else if(e.getSlot()==16) {
+                String targetName=duelTargets.get(p.getUniqueId());
+                Player target=targetName==null?null:Bukkit.getPlayerExact(targetName);
+                if(target==null){p.closeInventory();tell(p,"&cYour opponent is no longer online.");return;}
+                if(!isStaff(p) && settingString(target,"duel_requests").equals("Off")){p.closeInventory();tell(p,"&c"+target.getName()+" is not accepting duel requests.");return;}
+                duelRequests.put(target.getUniqueId(),p.getUniqueId());
+                p.closeInventory();
+                String modeName=prettyKitName(duelChosenKits.getOrDefault(p.getUniqueId(),"sword"));
+                int rounds=duelRounds.getOrDefault(p.getUniqueId(),1);
+                String mapName=duelMaps.getOrDefault(p.getUniqueId(),"random");
+                tell(p,"&aChallenge sent to &f"+target.getName()+"&a. &7Mode: &d"+modeName+" &8| &7Rounds: &f"+rounds+" &8| &7Map: &f"+mapName);
+                tell(target,"&d"+p.getName()+" &7challenged you! &8[&d"+modeName+" &8| &7"+rounds+" rounds &8| &7Map: "+mapName+"&8] &7Use &f/accept "+p.getName()+"&7 to accept.");
+                if(playerSetting(p,"duel_sounds",true)) p.playSound(p.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.4f);
+                if(playerSetting(target,"duel_sounds",true)) target.playSound(target.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, 1.6f);
+            }
         }
     }
     @EventHandler public void onRoundsInputChat(AsyncPlayerChatEvent e) {
