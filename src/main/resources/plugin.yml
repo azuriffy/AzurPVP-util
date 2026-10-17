@@ -1,0 +1,79 @@
+name: AzurPvPUtils
+version: 2.0.0
+main: net.azuriffy.azurpvp.AzurPvPPlugin
+api-version: '1.21'
+authors: [azuriffy]
+description: Purple-and-black PvP utilities with persistent role-based access.
+softdepend: [LuckPerms, PlaceholderAPI, Vault, Citizens]
+commands:
+  help: {description: View commands available to your role}
+  azurpvp: {description: Plugin help}
+  spawn: {description: Teleport to spawn}
+  setspawn: {description: Set the PvP spawn}
+  stats: {description: View statistics}
+  kit: {description: Receive a kit}
+  duel: {description: Challenge a player}
+  accept: {description: Accept a duel}
+  msg: {description: Send a private message}
+  reply: {description: Reply to a message}
+  ignore: {description: Ignore a player}
+  rules: {description: Show server rules}
+  discord: {description: Show Discord link}
+  ping: {description: Show latency}
+  tps: {description: Show server TPS}
+  fly: {description: Toggle flight}
+  heal: {description: Heal a player}
+  feed: {description: Feed a player}
+  vanish: {description: Toggle vanish}
+  freeze: {description: Freeze or unfreeze a player}
+  report: {description: Report a player}
+  staffchat: {description: Staff chat}
+  role: {description: Manage plugin roles}
+  back: {description: Return to previous location}
+  top: {description: View leaderboards}
+  tpa: {description: Admin teleport to a player}
+  home: {description: Teleport home}
+  sethome: {description: Set home}
+  warp: {description: Teleport to a warp}
+  setwarp: {description: Create a warp}
+  unwarp: {description: Delete a warp}
+  party: {description: Party system}
+  clan: {description: Clan system}
+  friends: {description: Friend list}
+  achievements: {description: Achievements}
+  quests: {description: Quests}
+  settings: {description: Player settings}
+  arena: {description: Arena management}
+  spectate: {description: Spectate a player's match, usage: /spectate <player>}
+  leave: {description: Stop spectating and return to the lobby}
+  bounty: {description: Bounty system}
+  killstreak: {description: Killstreak details}
+  playtime: {description: View playtime}
+  whois: {description: Player information}
+  maintenance: {description: Toggle maintenance mode}
+  staffmode: {description: Staff mode}
+  invsee: {description: Inspect inventory}
+  ec: {description: Inspect ender chest}
+  announce: {description: Broadcast an announcement}
+  mute: {description: Mute a player}
+  unmute: {description: Unmute a player}
+  ban: {description: Ban a player}
+  tempban: {description: Temporarily ban a player}
+  unban: {description: Unban a player}
+  kick: {description: Kick a player}
+  warn: {description: Warn a player}
+  history: {description: Punishment history}
+  alerts: {description: Toggle staff alerts}
+  cps: {description: CPS information}
+  clear: {description: Clear inventory}
+  repair: {description: Repair held item}
+  gamemode: {description: Change gamemode}
+  speed: {description: Change movement speed}
+  backup: {description: Create a backup}
+  cmode: {description: Owner-only toggle to bypass block place/break protection in your current world}
+  cpvparena: {description: Create a 200-block radius CPvP mining area}
+permissions:
+  azurpvp.admin: {default: op}
+  azurpvp.staff: {default: false}
+  azurpvp.fly: {default: false}
+  azurpvp.bypass.combattag: {default: op}
