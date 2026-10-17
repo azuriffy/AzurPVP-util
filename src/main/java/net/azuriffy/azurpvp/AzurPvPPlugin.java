@@ -531,12 +531,12 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
             } else {
                 int next = winnerAr + winnerGain;
                 boolean startsPromo = next >= 100;
-                try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=?, in_promotion=?, promotion_wins=0 WHERE uuid=?")) { ps.setInt(1, startsPromo ? 100 : next); ps.setInt(2, startsPromo ? 1 : 0); ps.setString(3, wid.toString()); ps.executeUpdate(); }
+                try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=?, in_promotion=?, promotion_wins=0 WHERE uuid=?")) { ps.setInt(1, startsPromo ? 100 : next); ps.setInt(2, startsPromo ? 1 : 0); ps.setString(3, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save ranked win: " + e.getMessage()); return; }
                 tell(winner, "&aRanked win! &d+"+winnerGain+" AR &8| &dAR: &f"+(startsPromo?100:next)+"/100");
                 if (startsPromo) tell(winner, "&6Promotion matches unlocked! &dWin 3 ranked matches to advance to &f"+AR_RANKS.get(wr+1)+"&d. AR cannot fall below 100 during promotion.");
             }
         } else {
-            try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=ar+? WHERE uuid=?")) { ps.setInt(1, winnerGain); ps.setString(2, wid.toString()); ps.executeUpdate(); }
+            try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=ar+? WHERE uuid=?")) { ps.setInt(1, winnerGain); ps.setString(2, wid.toString()); ps.executeUpdate(); } catch (SQLException e) { getLogger().warning("Could not save ranked win: " + e.getMessage()); return; }
             tell(winner, "&aRanked win! &d+"+winnerGain+" AR");
         }
         // Promotion AR is protected at 100. Outside promotion, AR losses can reach zero.
@@ -544,7 +544,7 @@ public final class AzurPvPPlugin extends JavaPlugin implements Listener, Command
         try (PreparedStatement ps = db.prepareStatement("UPDATE stats SET ar=?, in_promotion=?, promotion_wins=? WHERE uuid=?")) {
             ps.setInt(1, newLoserAr); ps.setInt(2, loserPromo ? 1 : (newLoserAr >= 100 && lr < AR_RANKS.size()-1 ? 1 : 0));
             ps.setInt(3, getStat(lid, "promotion_wins")); ps.setString(4, lid.toString()); ps.executeUpdate();
-        }
+        } catch (SQLException e) { getLogger().warning("Could not save ranked loss: " + e.getMessage()); return; }
         tell(loser, "&cRanked loss. &d-"+loserLoss+" AR &8| &dAR: &f"+newLoserAr+(loserPromo?" &8| &6Promotion progress protected":""));
     }
     private int playersPlayingKit(String kit, boolean ranked) {
